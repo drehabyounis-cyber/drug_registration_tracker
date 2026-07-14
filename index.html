@@ -38,6 +38,7 @@ try{
 // mirrors ourselves and re-emit the full picture to the app each time.
 let _companies = {};
 let _meta = { users: [], accessLog: [], changeLog: [] };
+let _attachments = [];
 
 window.cloudSync = {
   async saveCompany(name, data){
@@ -79,6 +80,44 @@ window.cloudSync = {
       if(error) throw error;
     }catch(e){ console.warn('cloud saveChangeLog failed', e); }
   },
+  // ---- PDF attachments: files live in Supabase Storage, metadata lives in
+  // the "attachments" table (synced live like everything else above). ----
+  async uploadAttachmentFile(path, blob){
+    if(!sb) throw new Error('offline');
+    const { error } = await sb.storage.from('attachments')
+      .upload(path, blob, { upsert:true, contentType: blob.type || 'application/pdf' });
+    if(error) throw error;
+  },
+  getAttachmentPublicUrl(path){
+    if(!sb) return '';
+    const { data } = sb.storage.from('attachments').getPublicUrl(path);
+    return data ? data.publicUrl : '';
+  },
+  async deleteAttachmentFile(path){
+    if(!sb || !path) return;
+    try{
+      const { error } = await sb.storage.from('attachments').remove([path]);
+      if(error) throw error;
+    }catch(e){ console.warn('cloud deleteAttachmentFile failed', e); }
+  },
+  async saveAttachment(rec){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('attachments').upsert({
+        att_id: rec.attId, row_id: rec.rowId, field_idx: rec.fieldIdx, field_label: rec.fieldLabel,
+        name: rec.name, url: rec.url, path: rec.path, size_kb: rec.sizeKB, date: rec.date,
+        uploaded_by: rec.uploadedBy, updated_at: new Date().toISOString()
+      });
+      if(error) throw error;
+    }catch(e){ console.warn('cloud saveAttachment failed', e); }
+  },
+  async deleteAttachment(attId){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('attachments').delete().eq('att_id', attId);
+      if(error) throw error;
+    }catch(e){ console.warn('cloud deleteAttachment failed', e); }
+  },
   // Fetches the current full state once, then subscribes to live changes.
   // Calls back(online) after the initial fetch succeeds (or after a timeout
   // if offline/misconfigured), matching the previous Firestore behavior.
@@ -91,12 +130,14 @@ window.cloudSync = {
 
       (async ()=>{
         try{
-          const [companiesRes, metaRes] = await Promise.all([
+          const [companiesRes, metaRes, attachmentsRes] = await Promise.all([
             sb.from('companies').select('name,data'),
-            sb.from('app_meta').select('key,data')
+            sb.from('app_meta').select('key,data'),
+            sb.from('attachments').select('att_id,row_id,field_idx,field_label,name,url,path,size_kb,date,uploaded_by')
           ]);
           if(companiesRes.error) throw companiesRes.error;
           if(metaRes.error) throw metaRes.error;
+          if(attachmentsRes.error) throw attachmentsRes.error;
 
           _companies = {};
           (companiesRes.data||[]).forEach(r=> _companies[r.name] = r.data);
@@ -111,6 +152,12 @@ window.cloudSync = {
           callbacks.onUsers(_meta.users);
           callbacks.onAccessLog(_meta.accessLog);
           callbacks.onChangeLog(_meta.changeLog);
+
+          _attachments = (attachmentsRes.data||[]).map(r=>({
+            attId:r.att_id, rowId:r.row_id, fieldIdx:r.field_idx, fieldLabel:r.field_label,
+            name:r.name, url:r.url, path:r.path, sizeKB:r.size_kb, date:r.date, uploadedBy:r.uploaded_by
+          }));
+          callbacks.onAttachments(_attachments.slice());
 
           sb.channel('companies-changes')
             .on('postgres_changes', { event:'*', schema:'public', table:'companies' }, (payload)=>{
@@ -130,6 +177,21 @@ window.cloudSync = {
               if(row.key === 'users'){ _meta.users = empty ? [] : (row.data.list||[]); callbacks.onUsers(_meta.users); }
               if(row.key === 'accessLog'){ _meta.accessLog = empty ? [] : (row.data.log||[]); callbacks.onAccessLog(_meta.accessLog); }
               if(row.key === 'changeLog'){ _meta.changeLog = empty ? [] : (row.data.log||[]); callbacks.onChangeLog(_meta.changeLog); }
+            })
+            .subscribe();
+
+          sb.channel('attachments-changes')
+            .on('postgres_changes', { event:'*', schema:'public', table:'attachments' }, (payload)=>{
+              if(payload.eventType === 'DELETE'){
+                _attachments = _attachments.filter(a=> a.attId !== payload.old.att_id);
+              } else {
+                const r = payload.new;
+                const rec = {attId:r.att_id, rowId:r.row_id, fieldIdx:r.field_idx, fieldLabel:r.field_label,
+                  name:r.name, url:r.url, path:r.path, sizeKB:r.size_kb, date:r.date, uploadedBy:r.uploaded_by};
+                const idx = _attachments.findIndex(a=> a.attId === rec.attId);
+                if(idx>=0) _attachments[idx] = rec; else _attachments.push(rec);
+              }
+              callbacks.onAttachments(_attachments.slice());
             })
             .subscribe();
 
@@ -430,6 +492,7 @@ const STORAGE_KEY = 'drugRegTrackerDB_v1';
 const USERS_KEY = 'drugRegTrackerUsers_v1';
 const ACCESSLOG_KEY = 'drugRegTrackerAccessLog_v1';
 const CHANGELOG_KEY = 'drugRegTrackerChangeLog_v1';
+const ATTACHMENTS_KEY = 'drugRegTrackerAttachmentsMeta_v1';
 const SESSION_KEY = 'drugRegTrackerSession_v1';
 let currentUser = null; // {username, role}
 
@@ -437,12 +500,67 @@ let currentUser = null; // {username, role}
 let USERS_CACHE = [];
 let ACCESSLOG_CACHE = [];
 let CHANGELOG_CACHE = [];
+// Metadata for every PDF attachment across every product (the files
+// themselves live in Supabase Storage; this is just name/url/etc, synced
+// live like everything else so any device sees any other device's uploads).
+let ATTACHMENTS_STORE = [];
 let appStarted = false; // becomes true after enterApp() runs (post-login)
 let _knownCompanyNames = new Set(); // used to detect remote deletions to push
 
-/* ============ INDEXEDDB FOR PDF ATTACHMENTS ============ */
+/* ============ PDF ATTACHMENTS ============
+   Files live in Supabase Storage (bucket "attachments"); metadata (name,
+   url, which product/field it belongs to...) lives in ATTACHMENTS_STORE,
+   which is kept live by the same realtime sync as everything else — so an
+   attachment uploaded on one device/user appears on every other one. */
+function sanitizeForPath(s){
+  return String(s||'file').replace(/[^\w.\-]+/g,'_').slice(0,120);
+}
+function genAttId(){
+  return 'att_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+}
+function addAttachment(rowId, fieldIdx, fieldLabel, name, dataUrl, sizeKB){
+  const attId = genAttId();
+  return fetch(dataUrl).then(r=> r.blob()).then(blob=>{
+    const path = `${rowId}/${attId}_${sanitizeForPath(name)}`;
+    if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){
+      return Promise.reject(new Error('التطبيق غير متصل بالخادم السحابي — لا يمكن رفع مرفقات وأنت غير متصل'));
+    }
+    return window.cloudSync.uploadAttachmentFile(path, blob).then(()=>{
+      const url = window.cloudSync.getAttachmentPublicUrl(path);
+      const rec = {
+        attId, rowId, fieldIdx, fieldLabel, name, url, path, sizeKB,
+        date: new Date().toISOString().slice(0,10),
+        uploadedBy: currentUser ? currentUser.username : ''
+      };
+      ATTACHMENTS_STORE = ATTACHMENTS_STORE.concat([rec]);
+      localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+      window.cloudSync.saveAttachment(rec);
+      return attId;
+    });
+  });
+}
+function getAttachments(rowId){
+  return Promise.resolve(ATTACHMENTS_STORE.filter(a=> a.rowId===rowId));
+}
+function deleteAttachmentById(attId){
+  const existing = ATTACHMENTS_STORE.find(a=> a.attId===attId);
+  ATTACHMENTS_STORE = ATTACHMENTS_STORE.filter(a=> a.attId!==attId);
+  localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+  if(!window.cloudSync) return Promise.resolve();
+  const tasks = [window.cloudSync.deleteAttachment(attId)];
+  if(existing && existing.path) tasks.push(window.cloudSync.deleteAttachmentFile(existing.path));
+  return Promise.all(tasks);
+}
+function deleteAttachmentsForRow(rowId){
+  return getAttachments(rowId).then(list=>{
+    return Promise.all(list.map(a=> deleteAttachmentById(a.attId)));
+  });
+}
+/* ---- legacy (pre-cloud-sync) IndexedDB reader — used once at boot only,
+   to migrate any attachments that were uploaded before this device ever
+   had a working cloud connection, so nothing already saved gets lost. ---- */
 let idbInstance = null;
-function openIDB(){
+function openLegacyIDB(){
   return new Promise((resolve,reject)=>{
     if(idbInstance){ resolve(idbInstance); return; }
     const req = indexedDB.open('drugRegAttachmentsDB', 1);
@@ -457,36 +575,41 @@ function openIDB(){
     req.onerror = function(e){ reject(e); };
   });
 }
-function addAttachment(rowId, fieldIdx, fieldLabel, name, dataUrl, sizeKB){
-  return openIDB().then(db=>new Promise((resolve,reject)=>{
-    const tx = db.transaction('attachments','readwrite');
-    const store = tx.objectStore('attachments');
-    const rec = {rowId, fieldIdx, fieldLabel, name, dataUrl, sizeKB, date: new Date().toISOString().slice(0,10)};
-    const req = store.add(rec);
-    req.onsuccess = ()=> resolve(req.result);
-    req.onerror = (e)=> reject(e);
-  }));
+function readLegacyAttachments(){
+  return openLegacyIDB().then(db=>new Promise((resolve)=>{
+    try{
+      const tx = db.transaction('attachments','readonly');
+      const req = tx.objectStore('attachments').getAll();
+      req.onsuccess = ()=> resolve(req.result || []);
+      req.onerror = ()=> resolve([]);
+    }catch(e){ resolve([]); }
+  })).catch(()=> []);
 }
-function getAttachments(rowId){
-  return openIDB().then(db=>new Promise((resolve,reject)=>{
-    const tx = db.transaction('attachments','readonly');
-    const idx = tx.objectStore('attachments').index('rowId');
-    const req = idx.getAll(rowId);
-    req.onsuccess = ()=> resolve(req.result || []);
-    req.onerror = (e)=> reject(e);
-  }));
-}
-function deleteAttachmentById(attId){
-  return openIDB().then(db=>new Promise((resolve,reject)=>{
-    const tx = db.transaction('attachments','readwrite');
-    const req = tx.objectStore('attachments').delete(attId);
-    req.onsuccess = ()=> resolve();
-    req.onerror = (e)=> reject(e);
-  }));
-}
-function deleteAttachmentsForRow(rowId){
-  return getAttachments(rowId).then(list=>{
-    return Promise.all(list.map(a=> deleteAttachmentById(a.attId)));
+function migrateLegacyAttachmentsToCloud(){
+  if(!window.cloudSync) return;
+  readLegacyAttachments().then(oldList=>{
+    if(!oldList || !oldList.length) return;
+    toast(`جارٍ ترحيل ${oldList.length} مرفق قديم من هذا الجهاز إلى المزامنة السحابية...`);
+    return Promise.all(oldList.map(old=>{
+      const attId = genAttId();
+      return fetch(old.dataUrl).then(r=> r.blob()).then(blob=>{
+        const path = `${old.rowId}/${attId}_${sanitizeForPath(old.name)}`;
+        return window.cloudSync.uploadAttachmentFile(path, blob).then(()=>{
+          const url = window.cloudSync.getAttachmentPublicUrl(path);
+          const rec = {
+            attId, rowId: String(old.rowId), fieldIdx: old.fieldIdx, fieldLabel: old.fieldLabel,
+            name: old.name, url, path, sizeKB: old.sizeKB, date: old.date || new Date().toISOString().slice(0,10),
+            uploadedBy: currentUser ? currentUser.username : ''
+          };
+          ATTACHMENTS_STORE = ATTACHMENTS_STORE.concat([rec]);
+          return window.cloudSync.saveAttachment(rec);
+        });
+      }).catch(e=> console.warn('attachment migration failed for', old && old.name, e));
+    })).then(()=>{
+      localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+      toast('تم ترحيل المرفقات القديمة بنجاح ✓');
+      refreshAllFieldBadges();
+    });
   });
 }
 function fileToDataUrl(file){
@@ -514,6 +637,7 @@ function loadLocalCacheOnly(){
   try{ USERS_CACHE = JSON.parse(localStorage.getItem(USERS_KEY)) || []; }catch(e){ USERS_CACHE = []; }
   try{ ACCESSLOG_CACHE = JSON.parse(localStorage.getItem(ACCESSLOG_KEY)) || []; }catch(e){ ACCESSLOG_CACHE = []; }
   try{ CHANGELOG_CACHE = JSON.parse(localStorage.getItem(CHANGELOG_KEY)) || []; }catch(e){ CHANGELOG_CACHE = []; }
+  try{ ATTACHMENTS_STORE = JSON.parse(localStorage.getItem(ATTACHMENTS_KEY)) || []; }catch(e){ ATTACHMENTS_STORE = []; }
 }
 /* Called after every local mutation of DB (add/edit/delete product or company,
    import, restore). Saves locally instantly, then pushes each company to the
@@ -820,20 +944,12 @@ function migrateInsertFieldAfter(refLabel, newLabel, newGroup, newSub){
   return Promise.all(tasks).then(()=> saveDB());
 }
 function shiftAttachmentFieldIdx(attId, newFieldIdx){
-  return openIDB().then(db=>new Promise((resolve,reject)=>{
-    const tx = db.transaction('attachments','readwrite');
-    const store = tx.objectStore('attachments');
-    const getReq = store.get(attId);
-    getReq.onsuccess = ()=>{
-      const rec = getReq.result;
-      if(!rec){ resolve(); return; }
-      rec.fieldIdx = newFieldIdx;
-      const putReq = store.put(rec);
-      putReq.onsuccess = ()=> resolve();
-      putReq.onerror = (e)=> reject(e);
-    };
-    getReq.onerror = (e)=> reject(e);
-  }));
+  const rec = ATTACHMENTS_STORE.find(a=> a.attId===attId);
+  if(!rec) return Promise.resolve();
+  rec.fieldIdx = newFieldIdx;
+  localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+  if(!window.cloudSync) return Promise.resolve();
+  return window.cloudSync.saveAttachment(rec);
 }
 /* Removes fields matching given labels (case-insensitive), for any company that has them.
    Shifts attachment fieldIdx values down accordingly, and drops attachments that were
@@ -1502,9 +1618,9 @@ function renderFieldAttPanel(idx){
       <span class="att-name">📄 ${esc(a.name)}</span>
       <span class="att-meta">${a.sizeKB} ك.ب · ${a.date}</span>
       <span class="att-actions">
-        <button class="btn btn-outline" onclick="viewAttachment(${a.attId})">عرض</button>
-        <button class="btn btn-outline" onclick="downloadAttachment(${a.attId})">تنزيل</button>
-        <button class="btn btn-red" onclick="removeAttachment(${a.attId},${idx})">حذف</button>
+        <button class="btn btn-outline" onclick="viewAttachment('${a.attId}')">عرض</button>
+        <button class="btn btn-outline" onclick="downloadAttachment('${a.attId}')">تنزيل</button>
+        <button class="btn btn-red" onclick="removeAttachment('${a.attId}',${idx})">حذف</button>
       </span>
     </div>`).join('') : `<div class="att-empty">لا توجد مرفقات لهذه المرحلة بعد</div>`;
   panel.innerHTML = `
@@ -1523,6 +1639,8 @@ function handleFieldAttachmentUpload(e, idx){
     if(f.type !== 'application/pdf'){ toast(`تم تجاهل "${f.name}" — يجب أن يكون الملف PDF`); return false; }
     return true;
   });
+  if(!validFiles.length){ e.target.value=''; return; }
+  toast(validFiles.length>1 ? `جارٍ رفع ${validFiles.length} ملفات...` : 'جارٍ رفع الملف...');
   Promise.all(validFiles.map(f=>
     fileToDataUrl(f).then(dataUrl=> addAttachment(currentRowId, idx, fieldLabel, f.name, dataUrl, Math.round(f.size/1024)))
   )).then(()=>{
@@ -1531,7 +1649,21 @@ function handleFieldAttachmentUpload(e, idx){
     attachmentsCache = list;
     refreshAllFieldBadges();
     renderFieldAttPanel(idx);
-    toast('تم إرفاق الملف بنجاح ✓');
+    toast('تم إرفاق الملف بنجاح — وسيظهر لباقي المستخدمين تلقائيًا ✓');
+    if(currentUser){
+      const nameIdx = findFieldIndex(currentCompany, ['product name']);
+      const rowArr = editingRowIndex!==null ? DB[currentCompany].rows[editingRowIndex] : null;
+      const productName = (rowArr && nameIdx>=0 && rowArr[nameIdx]) ? rowArr[nameIdx] : '(بدون اسم)';
+      pushChangeLog({
+        username: currentUser.username, role: currentUser.role,
+        company: currentCompany, product: productName,
+        action: 'رفع مرفق',
+        changes: validFiles.map(f=> ({field: fieldLabel, from:'', to: f.name}))
+      });
+    }
+  }).catch(err=>{
+    console.warn('attachment upload failed', err);
+    toast('تعذر رفع المرفق — تأكد من الاتصال بالإنترنت وحاول تاني');
   });
   e.target.value = '';
 }
@@ -1540,21 +1672,27 @@ function getAttachmentById(attId){
 }
 function viewAttachment(attId){
   getAttachmentById(attId).then(a=>{
-    if(!a) return;
-    const w = window.open();
-    w.document.write(`<iframe src="${a.dataUrl}" style="border:none;width:100%;height:100vh"></iframe>`);
+    if(!a || !a.url){ toast('تعذر فتح المرفق'); return; }
+    window.open(a.url, '_blank');
   });
 }
 function downloadAttachment(attId){
   getAttachmentById(attId).then(a=>{
-    if(!a) return;
+    if(!a || !a.url){ toast('تعذر تنزيل المرفق'); return; }
+    // "download" query param makes Supabase Storage send the file with a
+    // Content-Disposition that forces a real download (needed since the
+    // <a download> attribute is ignored for cross-origin links)
+    const url = a.url + (a.url.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(a.name);
     const link = document.createElement('a');
-    link.href = a.dataUrl; link.download = a.name;
+    link.href = url; link.download = a.name; link.target = '_blank';
+    document.body.appendChild(link);
     link.click();
+    link.remove();
   });
 }
 function removeAttachment(attId, idx){
   if(!confirm('هل تريد حذف هذا المرفق؟')) return;
+  const existing = attachmentsCache.find(a=> a.attId===attId);
   deleteAttachmentById(attId).then(()=> getAttachments(currentRowId)).then(list=>{
     attachmentsCache = list;
     refreshAllFieldBadges();
@@ -1572,6 +1710,17 @@ function removeAttachment(attId, idx){
     });
     renderFieldAttPanel(idx);
     toast('تم حذف المرفق');
+    if(currentUser && existing){
+      const nameIdx = findFieldIndex(currentCompany, ['product name']);
+      const rowArr = editingRowIndex!==null ? DB[currentCompany].rows[editingRowIndex] : null;
+      const productName = (rowArr && nameIdx>=0 && rowArr[nameIdx]) ? rowArr[nameIdx] : '(بدون اسم)';
+      pushChangeLog({
+        username: currentUser.username, role: currentUser.role,
+        company: currentCompany, product: productName,
+        action: 'حذف مرفق',
+        changes: [{field: existing.fieldLabel || '', from: existing.name, to: ''}]
+      });
+    }
   });
 }
 function onGtinInput(inputEl, idx){
@@ -2034,8 +2183,8 @@ function boot(){
   const localAccessLogBackup = JSON.parse(JSON.stringify(ACCESSLOG_CACHE));
   const localChangeLogBackup = JSON.parse(JSON.stringify(CHANGELOG_CACHE));
 
-  const cloudState = {companiesEmpty:true, usersEmpty:true, accessLogEmpty:true, changeLogEmpty:true};
-  const seen = {companies:false, users:false, accessLog:false, changeLog:false};
+  const cloudState = {companiesEmpty:true, usersEmpty:true, accessLogEmpty:true, changeLogEmpty:true, attachmentsEmpty:true};
+  const seen = {companies:false, users:false, accessLog:false, changeLog:false, attachments:false};
 
   const callbacks = {
     onCompanies: (companies)=>{
@@ -2068,6 +2217,25 @@ function boot(){
       localStorage.setItem(CHANGELOG_KEY, JSON.stringify(CHANGELOG_CACHE));
       const adminOverlay = document.getElementById('adminOverlay');
       if(appStarted && adminOverlay && adminOverlay.classList.contains('show')) renderAdminPanel();
+    },
+    onAttachments: (list)=>{
+      if(!seen.attachments){ seen.attachments = true; cloudState.attachmentsEmpty = !list || list.length===0; }
+      ATTACHMENTS_STORE = list || [];
+      localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+      // live-refresh whichever product dossier is currently open, so an
+      // attachment uploaded on another device/user shows up immediately
+      if(appStarted && currentRowId){
+        getAttachments(currentRowId).then(list2=>{
+          attachmentsCache = list2;
+          refreshAllFieldBadges();
+          document.querySelectorAll('.field-att-panel').forEach(p=>{
+            if(p.style.display !== 'none'){
+              const idx = parseInt(p.id.replace('field-att-',''), 10);
+              if(!isNaN(idx)) renderFieldAttPanel(idx);
+            }
+          });
+        });
+      }
     }
   };
 
@@ -2095,6 +2263,11 @@ function boot(){
         CHANGELOG_CACHE = localChangeLogBackup;
         localStorage.setItem(CHANGELOG_KEY, JSON.stringify(CHANGELOG_CACHE));
         window.cloudSync.saveChangeLog(CHANGELOG_CACHE);
+      }
+      if(cloudState.attachmentsEmpty){
+        // one-time: pick up any PDFs that were uploaded on this device before
+        // the cloud connection ever worked, so they aren't left behind
+        migrateLegacyAttachmentsToCloud();
       }
     } else {
       if(Object.keys(DB).length === 0){ DB = JSON.parse(JSON.stringify(SEED)); }
