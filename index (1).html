@@ -1,0 +1,2348 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>متابعة تسجيل الأدوية</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/JsBarcode/3.11.5/JsBarcode.all.min.js"></script>
+<script type="module">
+/* ============ SUPABASE CLOUD SYNC (real-time, cross-device) ============
+   Any add/edit/delete by any user on any device is written to this shared
+   Supabase project, and pushed live to every other open device/tab via
+   Realtime Postgres-changes subscriptions — no manual refresh needed.
+   This replaces the previous Firestore-based sync. The public interface
+   (window.cloudSync) is identical, so nothing else in this file changed. */
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+// ⚠️ حط هنا رابط ومفتاح مشروعك في Supabase (من Settings → API في لوحة تحكم Supabase)
+const SUPABASE_URL = "https://sjljmxpcuvrlbqmdbzpr.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNqbGpteHBjdXZybGJxbWRienByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5Mjg4MDUsImV4cCI6MjA5OTUwNDgwNX0.zFBmxWi07fdQ8Abalya_bR5YJ7qMHR6-_HPti4OA7NI";
+
+let sb = null;
+try{
+  if(!SUPABASE_URL.startsWith('PASTE_')){
+    sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  } else {
+    console.warn('Supabase not configured yet — fill in SUPABASE_URL / SUPABASE_ANON_KEY');
+  }
+}catch(e){
+  console.warn('Supabase init failed', e);
+}
+
+// Local mirrors, kept current by the realtime subscriptions below. Firestore
+// used to hand back the *entire* current collection on every event; Postgres
+// realtime only hands back the row that changed, so we merge into these
+// mirrors ourselves and re-emit the full picture to the app each time.
+let _companies = {};
+let _meta = { users: [], accessLog: [], changeLog: [] };
+let _attachments = [];
+
+window.cloudSync = {
+  async saveCompany(name, data){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('companies')
+        .upsert({ name, data, updated_at: new Date().toISOString() });
+      if(error) throw error;
+    }catch(e){ console.warn('cloud saveCompany failed', e); }
+  },
+  async deleteCompany(name){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('companies').delete().eq('name', name);
+      if(error) throw error;
+    }catch(e){ console.warn('cloud deleteCompany failed', e); }
+  },
+  async saveUsers(list){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('app_meta')
+        .upsert({ key:'users', data:{list}, updated_at: new Date().toISOString() });
+      if(error) throw error;
+    }catch(e){ console.warn('cloud saveUsers failed', e); }
+  },
+  async saveAccessLog(log){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('app_meta')
+        .upsert({ key:'accessLog', data:{log}, updated_at: new Date().toISOString() });
+      if(error) throw error;
+    }catch(e){ console.warn('cloud saveAccessLog failed', e); }
+  },
+  async saveChangeLog(log){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('app_meta')
+        .upsert({ key:'changeLog', data:{log}, updated_at: new Date().toISOString() });
+      if(error) throw error;
+    }catch(e){ console.warn('cloud saveChangeLog failed', e); }
+  },
+  // ---- PDF attachments: files live in Supabase Storage, metadata lives in
+  // the "attachments" table (synced live like everything else above). ----
+  async uploadAttachmentFile(path, blob){
+    if(!sb) throw new Error('offline');
+    const { error } = await sb.storage.from('attachments')
+      .upload(path, blob, { upsert:true, contentType: blob.type || 'application/pdf' });
+    if(error) throw error;
+  },
+  getAttachmentPublicUrl(path){
+    if(!sb) return '';
+    const { data } = sb.storage.from('attachments').getPublicUrl(path);
+    return data ? data.publicUrl : '';
+  },
+  async deleteAttachmentFile(path){
+    if(!sb || !path) return;
+    try{
+      const { error } = await sb.storage.from('attachments').remove([path]);
+      if(error) throw error;
+    }catch(e){ console.warn('cloud deleteAttachmentFile failed', e); }
+  },
+  async saveAttachment(rec){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('attachments').upsert({
+        att_id: rec.attId, row_id: rec.rowId, field_idx: rec.fieldIdx, field_label: rec.fieldLabel,
+        name: rec.name, url: rec.url, path: rec.path, size_kb: rec.sizeKB, date: rec.date,
+        uploaded_by: rec.uploadedBy, updated_at: new Date().toISOString()
+      });
+      if(error) throw error;
+    }catch(e){ console.warn('cloud saveAttachment failed', e); }
+  },
+  async deleteAttachment(attId){
+    if(!sb) return;
+    try{
+      const { error } = await sb.from('attachments').delete().eq('att_id', attId);
+      if(error) throw error;
+    }catch(e){ console.warn('cloud deleteAttachment failed', e); }
+  },
+  // Fetches the current full state once, then subscribes to live changes.
+  // Calls back(online) after the initial fetch succeeds (or after a timeout
+  // if offline/misconfigured), matching the previous Firestore behavior.
+  async init(callbacks){
+    if(!sb) return false;
+    return new Promise((resolve)=>{
+      let resolved = false;
+      const finishOnce = (ok)=>{ if(!resolved){ resolved = true; resolve(ok); } };
+      setTimeout(()=> finishOnce(false), 8000);
+
+      (async ()=>{
+        try{
+          const [companiesRes, metaRes, attachmentsRes] = await Promise.all([
+            sb.from('companies').select('name,data'),
+            sb.from('app_meta').select('key,data'),
+            sb.from('attachments').select('att_id,row_id,field_idx,field_label,name,url,path,size_kb,date,uploaded_by')
+          ]);
+          if(companiesRes.error) throw companiesRes.error;
+          if(metaRes.error) throw metaRes.error;
+          if(attachmentsRes.error) throw attachmentsRes.error;
+
+          _companies = {};
+          (companiesRes.data||[]).forEach(r=> _companies[r.name] = r.data);
+          callbacks.onCompanies({..._companies});
+
+          _meta = { users: [], accessLog: [], changeLog: [] };
+          (metaRes.data||[]).forEach(r=>{
+            if(r.key==='users') _meta.users = r.data.list || [];
+            if(r.key==='accessLog') _meta.accessLog = r.data.log || [];
+            if(r.key==='changeLog') _meta.changeLog = r.data.log || [];
+          });
+          callbacks.onUsers(_meta.users);
+          callbacks.onAccessLog(_meta.accessLog);
+          callbacks.onChangeLog(_meta.changeLog);
+
+          _attachments = (attachmentsRes.data||[]).map(r=>({
+            attId:r.att_id, rowId:r.row_id, fieldIdx:r.field_idx, fieldLabel:r.field_label,
+            name:r.name, url:r.url, path:r.path, sizeKB:r.size_kb, date:r.date, uploadedBy:r.uploaded_by
+          }));
+          callbacks.onAttachments(_attachments.slice());
+
+          sb.channel('companies-changes')
+            .on('postgres_changes', { event:'*', schema:'public', table:'companies' }, (payload)=>{
+              if(payload.eventType === 'DELETE'){
+                delete _companies[payload.old.name];
+              } else {
+                _companies[payload.new.name] = payload.new.data;
+              }
+              callbacks.onCompanies({..._companies});
+            })
+            .subscribe();
+
+          sb.channel('meta-changes')
+            .on('postgres_changes', { event:'*', schema:'public', table:'app_meta' }, (payload)=>{
+              const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+              const empty = payload.eventType === 'DELETE';
+              if(row.key === 'users'){ _meta.users = empty ? [] : (row.data.list||[]); callbacks.onUsers(_meta.users); }
+              if(row.key === 'accessLog'){ _meta.accessLog = empty ? [] : (row.data.log||[]); callbacks.onAccessLog(_meta.accessLog); }
+              if(row.key === 'changeLog'){ _meta.changeLog = empty ? [] : (row.data.log||[]); callbacks.onChangeLog(_meta.changeLog); }
+            })
+            .subscribe();
+
+          sb.channel('attachments-changes')
+            .on('postgres_changes', { event:'*', schema:'public', table:'attachments' }, (payload)=>{
+              if(payload.eventType === 'DELETE'){
+                _attachments = _attachments.filter(a=> a.attId !== payload.old.att_id);
+              } else {
+                const r = payload.new;
+                const rec = {attId:r.att_id, rowId:r.row_id, fieldIdx:r.field_idx, fieldLabel:r.field_label,
+                  name:r.name, url:r.url, path:r.path, sizeKB:r.size_kb, date:r.date, uploadedBy:r.uploaded_by};
+                const idx = _attachments.findIndex(a=> a.attId === rec.attId);
+                if(idx>=0) _attachments[idx] = rec; else _attachments.push(rec);
+              }
+              callbacks.onAttachments(_attachments.slice());
+            })
+            .subscribe();
+
+          finishOnce(true);
+        }catch(e){
+          console.warn('Supabase init failed', e);
+          finishOnce(false);
+        }
+      })();
+    });
+  }
+};
+window.dispatchEvent(new Event('cloudSyncScriptLoaded'));
+</script>
+<style>
+:root{
+  --navy:#0f2942; --navy2:#16365a; --gold:#c9a227; --gold2:#e0c267;
+  --bg:#f3f5f8; --card:#ffffff; --line:#e2e6ec; --text:#1c2b3a; --muted:#6b7a8d;
+  --green:#0f9d4d; --green-bg:#d9f7e3; --amber:#b8860b; --amber-bg:#fdf3df;
+  --red:#c23b3b; --red-bg:#fbe8e8; --blue:#1f5fa8; --blue-bg:#e8f1fb;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI","Tahoma",Arial,sans-serif;background:var(--bg);color:var(--text)}
+.app{display:flex;min-height:100vh}
+/* Sidebar */
+.sidebar{width:270px;background:linear-gradient(180deg,var(--navy),var(--navy2));color:#fff;display:flex;flex-direction:column;flex-shrink:0}
+.brand{padding:22px 18px 14px;border-bottom:1px solid rgba(255,255,255,.12)}
+.brand h1{font-size:17px;margin:0 0 4px}
+.brand p{font-size:12px;margin:0;color:#b9c6d6}
+.companies{flex:1;overflow-y:auto;padding:10px}
+.company-item{display:flex;justify-content:space-between;align-items:center;padding:11px 12px;border-radius:9px;cursor:pointer;margin-bottom:6px;font-size:14px;transition:.15s}
+.company-item:hover{background:rgba(255,255,255,.08)}
+.company-item.active{background:var(--gold);color:var(--navy);font-weight:700}
+.company-item .cnt{font-size:11px;background:rgba(255,255,255,.18);padding:2px 8px;border-radius:20px}
+.company-item.active .cnt{background:rgba(15,41,66,.18);color:var(--navy)}
+.sidebar-actions{padding:12px;border-top:1px solid rgba(255,255,255,.12);display:flex;flex-direction:column;gap:8px}
+.sidebar-actions button{background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.2);padding:9px;border-radius:8px;cursor:pointer;font-size:13px}
+.sidebar-actions button:hover{background:rgba(255,255,255,.18)}
+/* Main */
+.main{flex:1;padding:22px 28px;overflow-x:hidden;max-width:100%}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px}
+.topbar h2{margin:0;font-size:21px}
+.topbar .sub{color:var(--muted);font-size:13px;margin-top:2px}
+.tools{display:flex;gap:8px;flex-wrap:wrap}
+.btn{border:none;padding:9px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
+.btn-gold{background:var(--gold);color:var(--navy)}
+.btn-navy{background:var(--navy);color:#fff}
+.btn-outline{background:#fff;border:1px solid var(--line);color:var(--text)}
+.btn-red{background:var(--red-bg);color:var(--red)}
+.btn:hover{filter:brightness(0.95)}
+/* Stats */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
+.stat-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.stat-card .num{font-size:24px;font-weight:800;color:var(--navy)}
+.stat-card .lbl{font-size:12px;color:var(--muted);margin-top:2px}
+/* search */
+.searchbar{margin-bottom:14px}
+.searchbar input{width:100%;padding:11px 14px;border-radius:9px;border:1px solid var(--line);font-size:14px;background:#fff}
+/* product grid */
+.products{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.pcard{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px;cursor:pointer;transition:.15s;position:relative}
+.pcard:hover{box-shadow:0 4px 14px rgba(15,41,66,.1);transform:translateY(-2px)}
+.pcard .pname{font-weight:700;font-size:15px;margin-bottom:3px}
+.pcard .papi{font-size:12.5px;color:var(--muted);margin-bottom:10px}
+.badge{display:inline-block;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:700}
+.b-green{background:var(--green-bg);color:var(--green);font-weight:700}
+.b-amber{background:var(--amber-bg);color:var(--amber)}
+.b-red{background:var(--red-bg);color:var(--red)}
+.b-blue{background:var(--blue-bg);color:var(--blue)}
+.pcard .meta{margin-top:10px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between}
+.pcard .gtin-wrap{margin-top:8px;text-align:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px}
+.pcard .gtin-wrap svg{max-width:100%;height:34px}
+.pcard .gtin-num{font-size:10px;color:var(--muted);letter-spacing:1px;margin-top:1px}
+.field-gtin-preview{margin-top:8px;text-align:center;background:#fff;border:1px dashed var(--line);border-radius:8px;padding:8px}
+.field-gtin-preview svg{max-width:100%;height:46px}
+.field-gtin-preview .gtin-num{font-size:11px;color:var(--muted);letter-spacing:1px;margin-top:2px}
+.att-indicator{margin-top:6px}
+.empty{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty .icon{font-size:42px;margin-bottom:10px}
+/* Modal */
+.overlay{position:fixed;inset:0;background:rgba(15,25,35,.55);display:none;align-items:center;justify-content:center;z-index:100;padding:20px}
+.overlay.show{display:flex}
+.modal{background:#fff;border-radius:14px;width:100%;max-width:880px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden}
+.modal-head{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;background:var(--navy);color:#fff}
+.modal-head h3{margin:0;font-size:17px}
+.modal-head .x{cursor:pointer;font-size:20px;background:none;border:none;color:#fff}
+.modal-body{padding:20px 22px;overflow-y:auto}
+.field-row{display:grid;grid-template-columns:1fr;gap:4px;margin-bottom:10px}
+.section-title{font-weight:800;color:var(--navy);margin:18px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold);font-size:14px}
+.field-row label{font-size:12px;color:var(--muted)}
+.field-row input, .field-row select{padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13.5px;width:100%;font-family:inherit}
+.pw-wrap{position:relative}
+.pw-wrap input{padding-left:32px !important}
+.pw-toggle{position:absolute;left:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:15px;line-height:1;padding:5px 6px;border-radius:5px;color:var(--muted)}
+.pw-toggle:hover{color:var(--navy);background:var(--bg)}
+.field-label-row{display:flex;justify-content:space-between;align-items:center}
+.att-clip{background:none;border:1px solid var(--line);border-radius:20px;padding:1px 8px;font-size:11px;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:3px}
+.att-clip.has-att{background:var(--blue-bg);color:var(--blue);border-color:var(--blue)}
+.att-clip:hover{filter:brightness(0.97)}
+.field-att-panel{margin-top:6px;background:#f7f9fb;border:1px dashed var(--line);border-radius:9px;padding:10px}
+.att-item{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid var(--line);border-radius:7px;padding:7px 10px;margin-bottom:6px}
+.att-name{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
+.att-meta{font-size:11px;color:var(--muted)}
+.att-actions{display:flex;gap:5px}
+.att-actions .btn{padding:4px 9px;font-size:11.5px}
+.att-empty{font-size:12px;color:var(--muted);margin-bottom:8px}
+.att-upload-btn{cursor:pointer;display:inline-flex;padding:7px 12px;font-size:12px}
+.hint-box{font-size:12.5px;color:var(--navy);background:var(--blue-bg);padding:10px 14px;border-radius:9px;margin-bottom:16px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.modal-foot{padding:14px 22px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
+@media(max-width:760px){
+  .sidebar{position:fixed;right:-280px;height:100%;z-index:50;transition:.2s}
+  .sidebar.open{right:0}
+  .main{padding:14px}
+  .two-col{grid-template-columns:1fr}
+  .mobile-toggle{display:block!important}
+}
+.mobile-toggle{display:none;background:var(--navy);color:#fff;border:none;padding:8px 12px;border-radius:8px;margin-bottom:10px}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:11px 22px;border-radius:9px;font-size:13.5px;z-index:200;display:none}
+.toast.show{display:block;animation:fade .25s}
+@keyframes fade{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
+input[type=file]{display:none}
+/* Login screen */
+.login-overlay{position:fixed;inset:0;background:linear-gradient(180deg,var(--navy),var(--navy2));display:flex;align-items:center;justify-content:center;z-index:500;padding:20px}
+.login-box{background:#fff;border-radius:16px;width:100%;max-width:380px;padding:30px 26px;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+.login-box h2{margin:0 0 4px;color:var(--navy);font-size:19px;text-align:center}
+.login-box p.sub{margin:0 0 20px;color:var(--muted);font-size:12.5px;text-align:center}
+.login-box label{font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px}
+.login-box .field-row{margin-bottom:14px}
+.login-box input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit}
+.login-box .btn{width:100%;justify-content:center;padding:11px;font-size:14px;margin-top:6px}
+.login-err{background:var(--red-bg);color:var(--red);font-size:12.5px;padding:8px 12px;border-radius:8px;margin-bottom:12px;display:none}
+.login-err.show{display:block}
+.login-hint{background:var(--blue-bg);color:var(--navy);font-size:11.5px;padding:8px 12px;border-radius:8px;margin-top:14px}
+/* User badge */
+.user-badge{display:flex;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid rgba(255,255,255,.12);border-bottom:1px solid rgba(255,255,255,.12);color:#fff}
+.user-badge .av{width:30px;height:30px;border-radius:50%;background:var(--gold);color:var(--navy);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex-shrink:0}
+.user-badge .info{flex:1;min-width:0}
+.user-badge .uname{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.user-badge .urole{font-size:10.5px;color:#b9c6d6}
+.user-badge .logout-btn{background:none;border:none;color:#b9c6d6;cursor:pointer;font-size:16px}
+/* Admin / Reports modals reuse .overlay/.modal, extra table styles */
+.data-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:16px}
+.data-table th,.data-table td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}
+.data-table th{background:#f7f9fb;color:var(--navy);font-weight:700}
+.data-table tr:hover td{background:#fafbfc}
+.role-pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:10.5px;font-weight:700}
+.role-pill.admin{background:var(--gold2);color:var(--navy)}
+.role-pill.user{background:var(--blue-bg);color:var(--blue)}
+.change-item{font-size:11.5px;line-height:1.6;color:var(--navy)}
+.change-item b{color:var(--blue)}
+.change-item i{color:#9aa7b4}
+.admin-add-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px;align-items:flex-end}
+.admin-add-row .field-row{flex:1;min-width:140px;margin-bottom:0}
+.report-summary-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px}
+/* Expiry alerts */
+.expiry-banner{background:var(--amber-bg);border:1px solid var(--amber);border-radius:12px;padding:14px 16px;margin-bottom:18px}
+.expiry-banner.has-expired{background:var(--red-bg);border-color:var(--red)}
+.expiry-banner .eb-title{font-weight:800;color:var(--navy);font-size:13.5px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.expiry-list{display:flex;flex-direction:column;gap:6px}
+.expiry-item{display:flex;justify-content:space-between;align-items:center;background:#fff;border-radius:8px;padding:7px 12px;font-size:12.5px;cursor:pointer}
+.expiry-item:hover{filter:brightness(.98)}
+.expiry-item .ei-name{font-weight:700;color:var(--text)}
+.expiry-item .ei-meta{color:var(--muted);font-size:11.5px}
+.expiry-item .ei-days{font-weight:800;font-size:12px;padding:2px 9px;border-radius:20px}
+.expiry-item .ei-days.warn{background:var(--amber-bg);color:var(--amber)}
+.expiry-item .ei-days.danger{background:var(--red-bg);color:var(--red)}
+.sidebar-alert-badge{display:flex;align-items:center;gap:6px;margin:0 12px 10px;padding:8px 10px;background:rgba(194,59,59,.18);border:1px solid rgba(194,59,59,.4);border-radius:9px;color:#ffd9d9;font-size:12px;cursor:pointer}
+.pcard.expiring{box-shadow:0 0 0 2px var(--amber)}
+.pcard.expired-license{box-shadow:0 0 0 2px var(--red)}
+.pcard .exp-flag{position:absolute;top:10px;left:10px;font-size:15px}
+</style>
+</head>
+<body>
+<div class="login-overlay" id="bootOverlay">
+  <div class="login-box" style="text-align:center">
+    <h2>🧪 متابعة تسجيل الأدوية</h2>
+    <p class="sub" id="bootMsg">جاري الاتصال بالخادم السحابي...</p>
+  </div>
+</div>
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <h2 id="loginTitle">🔒 تسجيل الدخول</h2>
+    <p class="sub" id="loginSub">من فضلك سجّل الدخول للوصول إلى ملف متابعة التسجيل</p>
+    <div class="login-err" id="loginErr"></div>
+    <div class="field-row">
+      <label>اسم المستخدم</label>
+      <input id="loginUser" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginActionBtn').click()">
+    </div>
+    <div class="field-row">
+      <label>كلمة المرور</label>
+      <div class="pw-wrap">
+        <input id="loginPass" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')document.getElementById('loginActionBtn').click()">
+        <button type="button" class="pw-toggle" tabindex="-1" title="إظهار كلمة المرور" onclick="togglePwField('loginPass',this)">👁</button>
+      </div>
+    </div>
+    <div class="field-row" id="loginPass2Row" style="display:none">
+      <label>تأكيد كلمة المرور</label>
+      <div class="pw-wrap">
+        <input id="loginPass2" type="password" onkeydown="if(event.key==='Enter')document.getElementById('loginActionBtn').click()">
+        <button type="button" class="pw-toggle" tabindex="-1" title="إظهار كلمة المرور" onclick="togglePwField('loginPass2',this)">👁</button>
+      </div>
+    </div>
+    <button class="btn btn-gold" id="loginActionBtn" onclick="handleLoginAction()">دخول</button>
+    <div class="login-hint" id="loginHint" style="display:none">أنت أول من يفتح هذا الملف — هتتسجل تلقائيًا كـ Admin، وهتقدر تضيف مستخدمين تانيين بعد كده من لوحة الإدارة.</div>
+  </div>
+</div>
+<div class="app">
+  <div class="sidebar" id="sidebar">
+    <div class="brand">
+      <h1>🧪 متابعة تسجيل الأدوية</h1>
+      <p>نظام تتبع مراحل التسجيل الدوائي</p>
+    </div>
+    <div class="user-badge" id="userBadge" style="display:none">
+      <div class="av" id="userAvatar">A</div>
+      <div class="info">
+        <div class="uname" id="userNameLbl">—</div>
+        <div class="urole" id="userRoleLbl">—</div>
+      </div>
+      <button class="logout-btn" title="تسجيل الخروج" onclick="doLogout()">⏻ خروج</button>
+    </div>
+    <div class="companies" id="companyList"></div>
+    <div id="sidebarAlertBadge"></div>
+    <div class="sidebar-actions">
+      <button onclick="openNewCompany()">＋ شركة / ملف جديد</button>
+      <button onclick="document.getElementById('importFile').click()">⇪ استيراد ملف Excel</button>
+      <button onclick="exportBackup()">⇩ نسخة احتياطية JSON</button>
+      <button onclick="document.getElementById('restoreFile').click()">⇪ استعادة نسخة احتياطية</button>
+      <button onclick="openReports()">📊 التقارير</button>
+      <button id="adminPanelBtn" style="display:none" onclick="openAdminPanel()">🛡 لوحة الإدارة</button>
+      <input type="file" id="importFile" accept=".xlsx,.xls" onchange="handleImportExcel(event)">
+      <input type="file" id="restoreFile" accept=".json" onchange="handleRestore(event)">
+    </div>
+  </div>
+
+  <div class="main">
+    <button class="mobile-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')">☰ القائمة</button>
+    <div class="topbar">
+      <div>
+        <h2 id="companyTitle">—</h2>
+        <div class="sub" id="companySub"></div>
+      </div>
+      <div class="tools">
+        <button class="btn btn-gold" onclick="openNewProduct()">＋ إضافة منتج</button>
+        <button class="btn btn-outline" onclick="exportCompanyPDF()">⎙ تصدير PDF</button>
+        <button class="btn btn-outline" onclick="window.print()">🖨 طباعة</button>
+        <button class="btn btn-red" onclick="deleteCurrentCompany()">حذف الشركة</button>
+      </div>
+    </div>
+
+    <div id="expiryBanner"></div>
+    <div class="stats" id="statsRow"></div>
+    <div class="searchbar"><input id="searchInput" placeholder="🔍 بحث باسم المنتج أو المادة الفعالة أو الحالة..." oninput="renderProducts()"></div>
+    <div class="products" id="productsGrid"></div>
+  </div>
+</div>
+
+<div class="overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="modalTitle">بيانات المنتج</h3>
+      <button class="x" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-red" onclick="deleteProduct()" id="delProductBtn">🗑 حذف المنتج</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" onclick="closeModal()">إلغاء</button>
+        <button class="btn btn-gold" onclick="saveProduct()">💾 حفظ</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="overlay" id="adminOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>🛡 لوحة الإدارة — المستخدمون وسجل الدخول</h3>
+      <button class="x" onclick="closeAdminPanel()">✕</button>
+    </div>
+    <div class="modal-body" id="adminBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="reportsOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>📊 التقارير</h3>
+      <button class="x" onclick="closeReports()">✕</button>
+    </div>
+    <div class="modal-body" id="reportsBody"></div>
+  </div>
+</div>
+
+<script>
+/* ============ SEED DATA ============ */
+const SEED = {"Biotech Pharma  reg": {"groups": ["Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)", "Biotech  Pharma (Launching Dates)"], "subs": ["", "", "", "", "", "", "", "", "", "", "", "", ""], "fields": ["S.No", "Product Name", "API", "R&D file", "Box & Pamphlet", "Purchasing API (pilot batch )", "Production", "Samples withdrawal", "NODCAR", "Stability", "B.E", "Final reg. license & Market release", "commercial Production"], "rows": [["1", "Obstravactam", "Mavacamten 2.5 mg", "2025-07-01", "2026-06-01", "2025-08-01", "2026-02-01", "2026-05-01", "N/A", "2026-12-01", "2026-12-02", "2027-02-01", "2027-03-01"], ["2", "Obstravactam", "Mavacamten 5 mg", "2025-07-01", "2026-06-02", "2025-08-01", "2026-02-01", "2026-05-02", "N/A", "2026-12-02", "2026-12-03", "2027-02-02", "2027-03-02"], ["3", "Obstravactam", "Mavacamten 10 mg", "2025-07-01", "2026-06-03", "2025-08-01", "2026-02-01", "2026-05-03", "N/A", "2026-12-03", "2026-12-03", "2027-02-03", "2027-03-03"], ["4", "Entovisk 200 mg tab", "Sacubitril / Valsartan", "2025-07-01", "2026-06-01", "2025-08-01", "2026-07-01", "2026-08-01", "2026-08-01", "2027-03-01", "2027-03-01", "2027-06-01", ""], ["5", "Entovisk 100 mg", "Sacubitril / Valsartan", "2025-07-01", "2026-06-02", "2025-08-01", "2026-07-02", "2026-08-02", "2026-08-01", "2027-03-02", "2027-03-02", "2027-06-02", ""], ["6", "Entovisk 50 mg tab", "Sacubitril / Valsartan", "2025-07-01", "2026-06-03", "2025-08-01", "2026-07-03", "2026-08-03", "2026-08-01", "2027-03-03", "2027-03-03", "2027-06-03", ""], ["7", "Luminis 15 mg tab", "Mirogablin", "2025-07-01", "2026-06-04", "2025-08-01", "2026-08-01", "2026-09-01", "2026-09-01", "2027-04-01", "2027-04-01", "2027-07-01", ""], ["8", "Luminis 10 mg tab", "Mirogablin", "2025-07-01", "2026-06-05", "2025-08-01", "2026-08-02", "2026-09-02", "2026-09-02", "2027-04-02", "2027-04-02", "2027-07-02", ""], ["9", "Luminis 5 mg tab", "Mirogablin", "2025-07-01", "2026-06-06", "2025-08-01", "2026-08-03", "2026-09-03", "2026-09-03", "2027-04-03", "2027-04-03", "2027-07-03", ""], ["10", "Luminis 2.5 mg tab", "Mirogablin", "2025-07-01", "2026-06-07", "2025-08-01", "2026-08-04", "2026-09-04", "2026-09-04", "2027-04-04", "2027-04-04", "2027-07-04", ""], ["11", "Cholizm 20-10", "Resouvastatin/ Ezetimibe", "2025-07-01", "2026-06-08", "2025-08-01", "", "", "", "", "", "", ""], ["12", "Cholizm 10-10", "Resouvastatin/ Ezetimibe", "2025-07-01", "2026-06-09", "2025-08-01", "", "", "", "", "", "", ""], ["13", "Cholizm 40-10", "Resouvastatin/ Ezetimibe", "2025-07-01", "2026-06-10", "2025-08-01", "", "", "", "", "", "", ""], ["14", "Kefentech Gel", "", "Done", "", "", "", "", "", "", "", "", ""], ["15", "Dapaglyact 10 mg", "Dapagliflozin 10 mg", "Done", "", "", "", "", "", "", "", "", ""], ["16", "Dapaglyact 5mg", "Dapagliflozin 5 mg", "Done", "", "", "", "", "", "", "", "", ""], ["17", "Dapagliflozin/sitagliptin 10/100 mg", "Dapagliflozin/sitagliptin 10/100 mg", "N/A", "", "", "", "", "", "", "", "", ""], ["18", "Dapagliflozin /metofrmin 10/1000 mg", "Dapagliflozin /metofrmin 10/1000 mg", "N/A", "", "", "", "", "", "", "", "", ""]]}, "Fedo Pharma": {"groups": ["", "", "", "", "", "", "Naming", "Naming", "Naming", "Naming", "Naming", "Naming", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "PV", "PV", "Production", "Production", "Production", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "leaflet", "leaflet", "leaflet", "leaflet", "Layout", "Layout", "Layout", "Layout", "Layout", "Layout", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality"], "subs": ["", "", "", "", "", "", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Long term", "Long term", "Long term", "Long term", "Long term", "Type of  Study", "Start date of study", "End date of study", "Place of Study", "Received Date from S.C", "B.E Status", "B.E Status", "B.E Status", "B.E Status", "B.E Status", "Issue Date", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Variation", "Variation", "Variation", "Note", "Final license", "Note", "Note"], "fields": ["S.No", "Product Name", "API", "Decree", "product status", "Box approval Date", "Rrequest for list names from marketing", "Received Date from Marketing", "Submission Date to EDA", "Comment EDA", "reply comment", "Issue Date", "Rrequest Cost Sheet/ offer price  from S.C", "Received Date from S.C", "Submission Date", "Application No.", "Company Suggested Price", "Committee Decision", "Committee Decision Date", "Requsrt follow up (Appeal / meeting )", "Issue Date", "Exp.Date", "Submission Date", "Issue Date", "Type of Production (Commercial or Pilot )", "NO.of Production and  date", "Samples withdrawal", "Received Date from S.C", "Submission Date", "EDA Comments", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "Issue Date", "Received Date from S.C", "Start date of study", "End date of study", "Place of Study", "EDA Comments", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "Extra ordinary note", "Issue Date", "Received Date from S.C", "Start date of study", "End date of study", "Place of Study", "Stability Status", "", "", "", "", "", "Submission Date", "EDA Comments", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "", "Submission Date", "EDA Comment", "Reply to EDA", "Issue Date", "Received Date from designer", "Reg. Comments", "Submission Date", "EDA Comment", "Reply to EDA", "Issue Date", "Composition", "API (listing - user )", "S-Part (opened part -L.O.A - short cut from Email Eda - valid GMP - Risk ass)", "P-Part", "EDA Comment", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "Issue Date", "type of variation", "Status", "Issue Date", "", "", "", ""], "rows": [["1", "FEDOLACOSA 50 mg", "Lacosamide 50 mg", "296/2009", "Registered", "2013-01-01", "------", "------", "------", "------", "------", "2013-01-01", "------", "------", "------", "------", "------", "Strip 10 tablets      51 L.E", "", "", "8/10/2024", "2029-10-01", "ACO 13/07/2025", "22/07/2025", "Commercial", "frist  Commercial      on 11/1/2023", "2024-03-06", "-----", "-----", "-----", "-----", "-----", "-----", "Approved on     29-01-2025", "-----", "2024-02-01", "2024-08-01", "Analytica Center", "-----", "-----", "-----", "-----", "-----", "11-03-2025", "", "2024-02-01", "2027-02-01", "Analytica Center", "", "Biowaiver", "-----", "-----", "MSA University", "-----", "-----", "-----", "-----", "-----", "-----", "Approved on 05-02-2025", "-----", "-----", "-----", "Approved on 10/8/2023", "-----", "-----", "-----", "-----", "-----", "Approved on 06 /11/2024", "-----", "on 17-06-2026 we submitted the DMF", "-----", "-----", "", "", "", "", "", "-----", "-----", "-----", "شرط إفراح :1- تلتزم الشركة بــــــ تحليل التشغيلتين الثانية والثالثة من نفس المورد ولايتم الافراج إلا بعد صدور نتيجة التحليل . 2- تقديم دراسة الثبات المعجلة للتقييم للتشغيلتين الثانية والثالثة وتقديم دراسة طويلة المدي علي أول 3 تشغيلات إنتاجية خلال خمس سنوات من صدور الاخطار", "05/2025                      Reg.No: 32073/ 2025", "مهلة انتاج قبل 11-2026 اذا لم يتم الإنتاج يحول الي قرار 600 ويتم دفع 25000 مهلة لمدة 12 شهر", "تصنيع التشغيلة الثانية والثالثة شهر 8 - 2026"], ["2", "Fedolacosa 100 mg", "Lacosamide 100 mg", "425/2015", "Under registration – line extension", "2022-08-01", "------", "------", "------", "------", "------", "2024-05-01", "on 03-06-2026    I asked Dr. Amr to Send cost sheet", "on 04-06-2026 we received the cost sheet by email", "on 09-06-2026 we paid the receipt and submit the new application", "2040546631", "Strip 20 tablets      208.566 L.E", "Strip 10 tablets      71 L.E", "", "increase price", "28/10/2024", "2029-10-01", "28/09/2022", "2022-10-01", "Pilot", "2025-03-01", "2025-07-01", "", "", "", "", "", "", "", "2026-03-01", "2025-07-01", "2026-01-01", "Pharma guide", "", "", "", "", "", "", "", "2025-07-01", "2028-07-01", "Pharma guide", "", "Biowaiver", "2025-11-01", "", "MSA University", "2026-06-01", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "قرار 02-04-2026  تصنيع عدد 2 تشغيلة خلال 18 شهر من صدور القرار", "", "", "تصنيع التشغيلة الثانية والثالثة شهر 8 - 2026"], ["3", "Fedolacosa  200 mg", "Lacosamide 200 mg", "425/2015", "Under registration – line extension", "2022-09-01", "------", "------", "------", "------", "------", "", "------", "------", "------", "------", "------", "Strip 10 tablets      115 L.E", "", "", "28/10/2024", "2029-10-01", "2022-03-11", "2024-02-01", "Pilot", "2025-03-01", "2025-07-01", "", "", "", "", "", "", "", "2026-02-01", "2025-07-01", "2026-01-01", "Pharma guide", "", "", "", "", "", "", "", "2025-07-01", "2028-07-01", "Pharma guide", "", "Full Study", "2025-11-01", "", "MSA University", "2027-07-01", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "قرار 02-04-2026  تصنيع عدد 2 تشغيلة خلال 18 شهر من صدور القرار", "", "", "تصنيع التشغيلة الثانية والثالثة شهر 8 - 2026"], ["4", "Fedotriptan 2.5 mg", "Naratriptan 2.5 mg", "296/2009", "Registered", "", "", "", "", "", "", "", "", "", "", "", "", "Strip 6 tablets     136 L.E", "", "", "08-10-2024", "2029-10-01", "24/12/2025", "14/01/2026", "Commercial", "2023-11-01", "2024-01-11", "-----", "-----", "", "", "", "", "Approved on     28-08-2025", "-----", "2024-10-01", "2024-10-07", "Sabaa", "", "", "", "", "", "Approved on 25-03-2025", "-----", "2024-10-01", "2027-01-01", "Sabaa", "", "Full Study", "", "", "MSA University", "-----", "", "", "", "", "", "Approved on 13-10-2024", "-----", "", "", "Approved on 09-08-2023", "", "", "-----", "", "", "Approved on 08-05-2025", "", "", "", "", "", "", "", "", "", "", "", "", "شرط إفراح :1- تلتزم الشركة بــــــ تحليل التشغيلتين الثانية والثالثة من نفس المورد ولايتم الافراج إلا بعد صدور نتيجة التحليل . 2- تقديم دراسة الثبات المعجلة للتقييم للتشغيلتين الثانية والثالثة وتقديم دراسة طويلة المدي علي أول 3 تشغيلات إنتاجية خلال خمس سنوات من صدور الاخطار", "10/19/2025                  Reg.No: 33394/ 2025", "مهلة انتاج قبل 04-2027  اذا لم يتم الإنتاج يحول الي قرار 600 ويتم دفع 25000 مهلة لمدة 12 شهر", ""], ["5", "Telmifedo", "Telmisartan 40 mg", "450/2023 case 3 track A", "Under registration", "2024-03-01", "------", "------", "------", "------", "------", "2024-04-01", "", "", "", "2040457935", "on 03-2024 Strip 10 tablets       71.488 L.E", "on 03-2024 Strip 10 tablets      53 L.E Flat price مع المستحضر الأصلي Micardis 40 mg", "", "", "", "", "2024-01-04", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["6", "Telmifedo HCT", "Telmisartan 40 mg  Hydrochlorothiazide 12.5 mg", "450/2023 case 3 track A", "Under registration", "2024-03-01", "------", "------", "------", "------", "------", "2024-04-01", "", "", "", "2040462125", "on 03-2024 Strip 10 tablets       78.994L.E", "on 05-2024   Strip 10 tablets      55 L.E Flat price مع المستحضر الأصلي Micardis Plus 40/12.5 mg", "", "", "", "20/03/2024", "2024-01-04", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["7", "Fedomipide", "Rebamipide 100 mg", "296", "Registered", "2014-06-01", "----", "----", "----", "----", "----", "2014-10-01", "----", "----", "----", "----", "----", "1 strip 10 Tablets 38 L.E", "", "", "2024-10-01", "2029-10-01", "----", "----", "----", "----", "----", "----", "----", "----", "----", "----", "----", "----", "", "", "", "Renovation", "", "", "", "", "", "2023-10-01", "", "", "", "Renovation", "", "Full study", "", "", "", "", "", "", "", "", "", "2024-03-01", "", "", "", "2023-12-01", "", "", "", "", "", "2025-01-01", "", "", "", "", "", "", "", "", "", "", "", "", "", "1/1/2025                             Reg No. 37668/2024", "مهلة انتاج قبل 07-2026  اذا لم يتم الإنتاج يحول الي قرار 600 ويتم دفع 25000 مهلة لمدة 12 شهر", "on 21-06-2026 We submitted appeal follow up unit to extend - on 24-06-2026 We received an email from the EDA requesting the submission of the original application at the window this Wednesday, 01-07-2026"]]}, "Biotech Pharma": {"groups": ["", "", "", "", "", "", "", "", "Naming", "Naming", "Naming", "Naming", "Naming", "Naming", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "Pricing", "PV", "PV", "Production", "Production", "Production", "Production", "Production", "Production", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "NODCAR Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "Stability Status", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "B.E", "leaflet", "leaflet", "leaflet", "leaflet", "leaflet", "leaflet", "Layout", "Layout", "Layout", "Layout", "Layout", "Layout", "Layout", "Layout", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality", "Quality"], "subs": ["", "", "", "", "", "", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Accelrated", "Long term", "Long term", "Long term", "Type of  Study", "Start date of study", "End date of study", "Place of Study", "Received Date from S.C", "Received Date from S.C", "Received Date from S.C", "B.E Status", "B.E Status", "B.E Status", "Issue Date", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Reg. follow up", "Varition", "Varition", "Note", "Final license"], "fields": ["S.No", "Product Name", "API", "Decree", "product status", "Box approval Date", "Rrequest for list names from marketing", "Received Date from Marketing", "Submission Date to EDA", "Comment EDA", "reply comment to EDA", "Issue Date", "Rrequest Cost Sheet/ offer price  from S.C", "Received Date from S.C", "Submission Date", "Application No.", "Company Suggested Price", "Committee Decision", "Committee Decision Date", "Requsrt follow up (Appeal / meeting )", "Issue Date", "Exp.Date", "Submission Date", "Issue Date", "Type of Production (Commercial or Pilot )", "NO.of Production and  date", "Samples withdrawal", "Received Date from S.C", "Submission Date", "EDA Comments", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "Issue Date", "Received Date from S.C", "Start date of study", "End date of study", "Place of Study", "EDA Comments", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "Extra ordinary note", "Issue Date", "Received Date from S.C", "Start date of study", "End date of study", "Place of Study", "Stability Status", "", "", "", "", "", "Submission Date", "EDA Comments", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "", "Submission Date", "EDA Comment", "Reply to EDA", "Issue Date", "Received Date from designer", "Comments", "Submission Date", "EDA Comment", "Reply to EDA", "Issue Date", "Composition", "API (listing - user )", "S-Part (opened part -L.O.A - short cut from Email Eda - valid GMP - Risk ass)", "P-Part", "EDA Comment", "comments sent to S.C", "comments received from  S.C", "Reply to EDA", "Issue Date", "type of variation", "Status", "Issue Date", "", ""], "rows": [["1", "Obstravactam", "Mavacamten 2.5 mg", "425 /2015", "Under registration", "2022-06-01", "---------", "---------", "---------", "---------", "---------", "2022-09-01", "", "", "", "2040463530", "", "on 17-04-2024          1 Strip 10 Cap      1500 L.E                   تم تسعيره بناءا علي البديل الذي تم تسعيره بنفس اللجنة منتج Camzycamten 10 mg Cap", "", "", "", "", "18/07/2022", "16/10/2023", "Pilot", "3  Pilot Batch    02/2026", "not yet", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "Biowaiver", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["2", "Obstravactam", "Mavacamten 5 mg", "450 Case 1", "Under registration – line extension", "2025-06-01", "---------", "---------", "---------", "---------", "---------", "2025-07-01", "on 07-12-2025 request  by email", "on 08-12-2025 received by email", "", "2040541308", "Appeal  on 16-12-2025                       1 Strip 10  capsules  1601.326 L.E", "on 08-06-2026        1 strip 10 hard capsule  1500 L.E      تم التسعير بناءا علي اخر مثائل مسعره", "", "", "", "", "2025-08-07", "20/07/2025", "Pilot", "3 Pilot Batch   02/2026", "not yet", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "Full Study", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["3", "Obstravactam", "Mavacamten 10 mg", "450 Case 1", "Under registration – line extension", "2025-06-01", "", "", "", "", "", "2025-07-01", "on 07-12-2025 request  by email", "on 08-12-2025 received by email", "", "2040541310", "Appeal on  16-12-2025        1 Strip 10  capsules  1794.343 L.E", "on 08-06-2026        1 strip 10 hard capsule  1500 L.E      تم التسعير بناءا علي اخر مثائل مسعره", "", "", "", "", "2025-08-07", "20/07/2025", "Pilot", "3 Pilot Batch   02/2026", "not yet", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "Biowaiver", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["4", "Entovisk 200 mg tab", "Sacubitril / Valsartan", "450 case 3 track D", "Under registration", "2025-03-01", "---------", "---------", "---------", "---------", "---------", "2025-05-01", "", "", "on 20-04-2025 Submitted to EDA", "2040505812", "The Suggested Price for 1 strip  10 tablets 409.267 L.E", "on 16-07-2025         1 Strip 10 tablets    411 L.E                    تم التسعير بناء علي طلب الشركة", "", "", "", "", "15/04/2025", "29/06/2025", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["5", "Entovisk 100 mg", "Sacubitril / Valsartan", "450 case 3 track D", "Line extension", "2025-06-01", "---------", "---------", "---------", "---------", "---------", "2025-07-01", "", "", "on 14-07-2025 submitted to EDA", "2040507796", "The Suggested Price for 1 strip  10 tablets 288.632  L.E", "on 16-07-2025           1 Strip 10 tablets   291 L.E    تم التسعير بناء علي طلب الشركة", "", "", "", "", "14/07/2025", "22/07/2025", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["6", "Entovisk 50 mg tab", "Sacubitril / Valsartan", "450 case 3 track D", "Line extension", "2025-06-01", "---------", "---------", "---------", "---------", "---------", "2025-07-01", "", "", "on 14-07-2025 submitted to EDA", "2040507795", "The Suggested Price for 1 strip  10 tablets 216.250 L.E", "on 16-07-2025         1 Strip 10 tablets   218 L.E  تم التسعير بناء علي طلب الشركة", "", "", "", "", "14/07/2025", "22/07/2025", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["7", "Luminis 15 mg tab", "Mirogablin  15 mg", "450 case 3 track D", "Under registration", "2025-04-01", "---------", "---------", "---------", "---------", "---------", "2025-07-01", "", "", "on 12-10-2025  submitted to EDA", "2040506384", "1 strip 10 tablets 139.222 L.E", "", "", "1- on 09-06-2026 Submitted inquire  to EDA               2- on 23-06-2026 submitted  new price 250.207 L.E", "", "", "2025-03-06", "15/07/2025", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["8", "Luminis 10 mg tab", "Mirogablin 10 mg", "450 case 3 track D", "Line extension", "2025-10-01", "", "", "", "", "", "2025-10-01", "", "", "on 12-10-2025  submitted to EDA                   2- on 08-06-2026 Submitted rquest to EDA", "2040539803", "1 strip 10 tablets 103.121 L.E", "", "", "1- on 09-06-2026 Submitted inquire  to EDA               2- on 23-06-2026 submitted  new price 194.804 L.E", "", "", "14/10/2025", "2025-12-11", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["9", "Luminis 5 mg tab", "Mirogablin  5 mg", "450 case 3 track D", "Line extension", "2025-10-01", "", "", "", "", "", "2025-10-01", "", "", "on 12-10-2025  submitted to EDA", "2040539798", "1 strip 10 tablets 88.645 L.E", "", "", "on 08-06-2026 Submitted inquire  to EDA  2- on 23-06-2026 submitted  new price 146.550 L.E", "", "", "14/10/2025", "2025-12-11", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["10", "Luminis 2.5 mg tab", "Mirogablin 2.5 mg", "450 case 3 track D", "Line extension", "2025-10-01", "---------", "---------", "---------", "---------", "---------", "2025-10-01", "", "", "on 12-10-2025  submitted to EDA", "2040539765", "1 strip 10 tablets 70.594 L.E", "", "", "1- on 08-06-2026 Submitted inquire  to EDA                 2- on 23-06-2026 submitted  new price 104.372 L.E", "", "", "14/10/2025", "2025-12-11", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 07-06-2026 Submitted request to EDA", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "on 17-06-2026 submitted to the Follow-up Department to produce production batches for the product, and we are currently awaiting the issuance of the approval letter.", ""], ["11", "Cholizm 20-10", "Resouvastatin/ Ezetimibe", "450 case 3 track D", "Under registration", "2025-07-01", "---------", "---------", "---------", "---------", "---------", "2025-10-01", "", "on 17-06-2026 received new cost sheet", "on 20-07-2025  submitted to EDA", "2040546905", "1-The Suggested Price for 1 strip 10 tablets 124.210 L.E                                           2- new Suggested Price for 1 strip 10 tablets 149.231 L.E", "on 22-12-2025         1 Strip 10 tablets   98 L.E بناء علي اعلي سعر مثيل متوفر  Zyrovazet الخاص بشركة الكسير", "", "on 22-06-2026 submitted Appeal to EDA new price 1 strip 10 tablets  149.231 L.E", "", "", "28/07/2025", "2025-02-10", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["12", "Cholizm 10-10", "Resouvastatin/ Ezetimibe", "450 case 3 track D", "Line extension", "2026-05-01", "---------", "---------", "21-05-2026", "---------", "---------", "2026-10-06", "", "on 19-05-2026 received  by email", "on 03-06-2026  submitted to EDA", "2040546469", "The Suggested Price for 1 strip 10 tablets 109.198 L.E", "", "", "مراجعه الأسعار بعد العرض علي اللجنة للتركيزات المختلفة", "", "", "2026-08-06", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["13", "Cholizm 40-10", "Resouvastatin/ Ezetimibe", "450 case 3 track D", "Line extension", "2026-05-01", "---------", "---------", "21-05-2026", "---------", "---------", "2026-10-06", "", "1-on 19-05-2026 received  by email                2- on 17-06-2026 received  by email", "1-on 03-06-2026  submitted to EDA                         2- on 23-06-2026  submitted to EDA", "2040546465", "1- The Suggested Price for 1 strip 10 tablets 124.210 L.E          2- The new Suggested Price for 1 strip 10 tablets 174.251 L.E", "", "", "on 23-06-2026 submitted new price 1 strip 10 tablets 174.251 L.E", "", "", "2026-08-06", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["14", "Dapaglyact 10 mg", "Dapagliflozin 10 mg", "450 case 3 track D", "Under registration", "2025-09-01", "---------", "---------", "---------", "---------", "---------", "2025-11-01", "", "", "on 20-07-2025  submitted to EDA", "2040529304", "The Suggested Price for 1 strip 10 tablets 95.794 L.E", "on 30-09-2025         1 Strip 10 tablets   98 L.E", "", "the price is fair", "", "", "22/09/2025", "07/101/2025", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["15", "Dapaglyact 5mg", "Dapagliflozin 5 mg", "450 case 3 track D", "Line extension", "2026-05-01", "---------", "---------", "21-05-2026", "---------", "---------", "", "", "on 19-05-2026 received  by email", "on 03-06-2026  submitted to EDA", "2040546468", "The Suggested Price for 1 strip 10 tablets 70.773 L.E", "", "", "", "", "", "2026-08-06", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["16", "Daxiga", "Dapagliflozin/sitagliptin 10/100 mg", "450 case 3 track D", "Under registration", "2025-08-01", "---------", "---------", "---------", "---------", "---------", "2025-10-01", "", "", "on 08-2025  submitted to EDA     on 22-06-2026 submitted appeal to EDA", "2040546894", "1- The Suggested Price for 1 strip 10 tablets 105.80  L.E                                            2-  on 22-06-2026 submitted Appeal The Suggested Price for 1 strip 10 tablets is 125.818 L.E", "on 30-09-2025         1 Strip 10 tablets   107 L.E بناء علي طلب الشركة", "", "on 22-06-2026 submitted appeal to EDA  The Suggested Price for 1 strip 10 tablets is 125.818 L.E", "", "", "31/08/2025", "2025-11-09", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["17", "Dapaglyact plus XR", "Dapagliflozin /metofrmin 10/1000 mg", "450 case 3 track D", "Under registration", "2025-08-01", "---------", "---------", "---------", "---------", "---------", "2025-12-01", "", "", "on 10-08-2025  submitted to EDA", "2040528433", "The Suggested Price for 1 strip 10 tablets 100.798 L.E", "on 15-02-2026        1 Strip 10 tablets   87 L.E  تم التسعير بناء علي أكثر مثيل متوفر الخاص بشركة ايفا فارما", "", "the price is fair", "", "", "13/08/2025", "27/08/2025", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""], ["18", "Semaglutide 14 mg", "Semaglutide 14 mg", "( تسجيل غير اعتيادي )450", "Under registration", "2026-03-01", "1-on 07-04-2026  request by email frist list                                2- on 11-05-2026 request second list by email", "1-on 14-04-2026 received frist list by email   2-on 20-05-2026  received the second list", "on 14-04-2026 submitted frist list", "on 11-05-2026 first list was rejected", "", "", "on 11-03-2026           request by email", "on 31-03-2026 received  by email", "on 06-04-2026 Submitted to EDA", "2040543980", "1 strip 10 tablets is 1759.850 LE", "", "", "ok", "", "", "2026-05-04", "2026-12-04", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "لابد من التصنيع قبل 03-2027                                                                         - on 30-06-2026 we submitted to inquire about the possibility of manufacturing the product on the Wadi El Nil Benta production line", ""], ["19", "Camtosol", "Aficamten 10 mg", "450 Case 1", "Under registration", "2026-03-01", "---------", "---------", "---------", "---------", "---------", "2026-03-01", "on 04-03-2026           request by email", "on 16-03-2026 received  by whats app", "on  16-03-2026  Submitted to EDA", "2040543600", "1 strip 10 F.C.T 2083.868 L.E", "on 21-06-2026          1 Strip 10 tablets 642 L.E تم التسعير بناءا علي سعر المستحضر المثيل الخاص بشركة ايفا فارما", "", "", "", "", "18/03/2026", "2026-02-04", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]]}};
+
+/* ============ STATE ============ */
+let DB = {};
+let currentCompany = null;
+let editingRowIndex = null; // null = new product
+let currentRowId = null; // stable id used for attachments linkage
+
+const STORAGE_KEY = 'drugRegTrackerDB_v1';
+const USERS_KEY = 'drugRegTrackerUsers_v1';
+const ACCESSLOG_KEY = 'drugRegTrackerAccessLog_v1';
+const CHANGELOG_KEY = 'drugRegTrackerChangeLog_v1';
+const ATTACHMENTS_KEY = 'drugRegTrackerAttachmentsMeta_v1';
+const SESSION_KEY = 'drugRegTrackerSession_v1';
+let currentUser = null; // {username, role}
+
+/* ---- Cloud sync state (Supabase mirrors localStorage in real time) ---- */
+let USERS_CACHE = [];
+let ACCESSLOG_CACHE = [];
+let CHANGELOG_CACHE = [];
+// Metadata for every PDF attachment across every product (the files
+// themselves live in Supabase Storage; this is just name/url/etc, synced
+// live like everything else so any device sees any other device's uploads).
+let ATTACHMENTS_STORE = [];
+let appStarted = false; // becomes true after enterApp() runs (post-login)
+let _knownCompanyNames = new Set(); // used to detect remote deletions to push
+
+/* ============ PDF ATTACHMENTS ============
+   Files live in Supabase Storage (bucket "attachments"); metadata (name,
+   url, which product/field it belongs to...) lives in ATTACHMENTS_STORE,
+   which is kept live by the same realtime sync as everything else — so an
+   attachment uploaded on one device/user appears on every other one. */
+function sanitizeForPath(s){
+  return String(s||'file').replace(/[^\w.\-]+/g,'_').slice(0,120);
+}
+function genAttId(){
+  return 'att_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+}
+function addAttachment(rowId, fieldIdx, fieldLabel, name, dataUrl, sizeKB){
+  const attId = genAttId();
+  return fetch(dataUrl).then(r=> r.blob()).then(blob=>{
+    const path = `${rowId}/${attId}_${sanitizeForPath(name)}`;
+    if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){
+      return Promise.reject(new Error('التطبيق غير متصل بالخادم السحابي — لا يمكن رفع مرفقات وأنت غير متصل'));
+    }
+    return window.cloudSync.uploadAttachmentFile(path, blob).then(()=>{
+      const url = window.cloudSync.getAttachmentPublicUrl(path);
+      const rec = {
+        attId, rowId, fieldIdx, fieldLabel, name, url, path, sizeKB,
+        date: new Date().toISOString().slice(0,10),
+        uploadedBy: currentUser ? currentUser.username : ''
+      };
+      ATTACHMENTS_STORE = ATTACHMENTS_STORE.concat([rec]);
+      localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+      window.cloudSync.saveAttachment(rec);
+      return attId;
+    });
+  });
+}
+function getAttachments(rowId){
+  return Promise.resolve(ATTACHMENTS_STORE.filter(a=> a.rowId===rowId));
+}
+function deleteAttachmentById(attId){
+  const existing = ATTACHMENTS_STORE.find(a=> a.attId===attId);
+  ATTACHMENTS_STORE = ATTACHMENTS_STORE.filter(a=> a.attId!==attId);
+  localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+  if(!window.cloudSync) return Promise.resolve();
+  const tasks = [window.cloudSync.deleteAttachment(attId)];
+  if(existing && existing.path) tasks.push(window.cloudSync.deleteAttachmentFile(existing.path));
+  return Promise.all(tasks);
+}
+function deleteAttachmentsForRow(rowId){
+  return getAttachments(rowId).then(list=>{
+    return Promise.all(list.map(a=> deleteAttachmentById(a.attId)));
+  });
+}
+/* ---- legacy (pre-cloud-sync) IndexedDB reader — used once at boot only,
+   to migrate any attachments that were uploaded before this device ever
+   had a working cloud connection, so nothing already saved gets lost. ---- */
+let idbInstance = null;
+function openLegacyIDB(){
+  return new Promise((resolve,reject)=>{
+    if(idbInstance){ resolve(idbInstance); return; }
+    const req = indexedDB.open('drugRegAttachmentsDB', 1);
+    req.onupgradeneeded = function(e){
+      const db = e.target.result;
+      if(!db.objectStoreNames.contains('attachments')){
+        const store = db.createObjectStore('attachments', {keyPath:'attId', autoIncrement:true});
+        store.createIndex('rowId','rowId',{unique:false});
+      }
+    };
+    req.onsuccess = function(e){ idbInstance = e.target.result; resolve(idbInstance); };
+    req.onerror = function(e){ reject(e); };
+  });
+}
+function readLegacyAttachments(){
+  return openLegacyIDB().then(db=>new Promise((resolve)=>{
+    try{
+      const tx = db.transaction('attachments','readonly');
+      const req = tx.objectStore('attachments').getAll();
+      req.onsuccess = ()=> resolve(req.result || []);
+      req.onerror = ()=> resolve([]);
+    }catch(e){ resolve([]); }
+  })).catch(()=> []);
+}
+function migrateLegacyAttachmentsToCloud(){
+  if(!window.cloudSync) return;
+  readLegacyAttachments().then(oldList=>{
+    if(!oldList || !oldList.length) return;
+    toast(`جارٍ ترحيل ${oldList.length} مرفق قديم من هذا الجهاز إلى المزامنة السحابية...`);
+    return Promise.all(oldList.map(old=>{
+      const attId = genAttId();
+      return fetch(old.dataUrl).then(r=> r.blob()).then(blob=>{
+        const path = `${old.rowId}/${attId}_${sanitizeForPath(old.name)}`;
+        return window.cloudSync.uploadAttachmentFile(path, blob).then(()=>{
+          const url = window.cloudSync.getAttachmentPublicUrl(path);
+          const rec = {
+            attId, rowId: String(old.rowId), fieldIdx: old.fieldIdx, fieldLabel: old.fieldLabel,
+            name: old.name, url, path, sizeKB: old.sizeKB, date: old.date || new Date().toISOString().slice(0,10),
+            uploadedBy: currentUser ? currentUser.username : ''
+          };
+          ATTACHMENTS_STORE = ATTACHMENTS_STORE.concat([rec]);
+          return window.cloudSync.saveAttachment(rec);
+        });
+      }).catch(e=> console.warn('attachment migration failed for', old && old.name, e));
+    })).then(()=>{
+      localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+      toast('تم ترحيل المرفقات القديمة بنجاح ✓');
+      refreshAllFieldBadges();
+    });
+  });
+}
+function fileToDataUrl(file){
+  return new Promise((resolve,reject)=>{
+    const r = new FileReader();
+    r.onload = ()=> resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+/* ensure each row has a stable unique id (for linking attachments) */
+function ensureRowId(company, index){
+  const d = DB[company];
+  if(!d.ids) d.ids = [];
+  while(d.ids.length < d.rows.length){
+    d.ids.push('r_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+  }
+  return d.ids[index];
+}
+
+/* Reads whatever is cached locally (used for instant paint while the cloud
+   connection is still being established, and as an offline fallback). */
+function loadLocalCacheOnly(){
+  try{ DB = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }catch(e){ DB = {}; }
+  try{ USERS_CACHE = JSON.parse(localStorage.getItem(USERS_KEY)) || []; }catch(e){ USERS_CACHE = []; }
+  try{ ACCESSLOG_CACHE = JSON.parse(localStorage.getItem(ACCESSLOG_KEY)) || []; }catch(e){ ACCESSLOG_CACHE = []; }
+  try{ CHANGELOG_CACHE = JSON.parse(localStorage.getItem(CHANGELOG_KEY)) || []; }catch(e){ CHANGELOG_CACHE = []; }
+  try{ ATTACHMENTS_STORE = JSON.parse(localStorage.getItem(ATTACHMENTS_KEY)) || []; }catch(e){ ATTACHMENTS_STORE = []; }
+}
+/* Called after every local mutation of DB (add/edit/delete product or company,
+   import, restore). Saves locally instantly, then pushes each company to the
+   shared cloud database so every other device/user sees it live. */
+function saveDB(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(DB));
+  if(!window.cloudSync) return;
+  const currentNames = new Set(Object.keys(DB));
+  currentNames.forEach(name=> window.cloudSync.saveCompany(name, DB[name]));
+  _knownCompanyNames.forEach(name=>{
+    if(!currentNames.has(name)) window.cloudSync.deleteCompany(name);
+  });
+  _knownCompanyNames = currentNames;
+}
+
+/* ============ AUTH: USERS / LOGIN / ACCESS LOG ============ */
+function simpleHash(str){
+  // Lightweight client-side hash (NOT cryptographic security — this is a single offline
+  // HTML file with no server, so it only prevents casual/plain-text password exposure).
+  str = String(str);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for(let i=0;i<str.length;i++){
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1>>>16), 2246822507) ^ Math.imul(h2 ^ (h2>>>13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2>>>16), 2246822507) ^ Math.imul(h1 ^ (h1>>>13), 3266489909);
+  return (h1>>>0).toString(16) + (h2>>>0).toString(16);
+}
+function getUsers(){ return USERS_CACHE; }
+function saveUsers(list){
+  USERS_CACHE = list;
+  localStorage.setItem(USERS_KEY, JSON.stringify(list));
+  if(window.cloudSync) window.cloudSync.saveUsers(list);
+}
+function getAccessLog(){ return ACCESSLOG_CACHE; }
+function pushAccessLog(entry){
+  const log = ACCESSLOG_CACHE.slice();
+  log.unshift(Object.assign({time: new Date().toLocaleString('ar-EG')}, entry));
+  if(log.length > 300) log.length = 300;
+  ACCESSLOG_CACHE = log;
+  localStorage.setItem(ACCESSLOG_KEY, JSON.stringify(log));
+  if(window.cloudSync) window.cloudSync.saveAccessLog(log);
+}
+/* ---- Change log (audit trail of content edits) — admin-only visibility.
+   Nothing in the regular UI surfaces this; it is written silently on every
+   add/edit/delete of products, companies, imports and restores. ---- */
+function getChangeLog(){ return CHANGELOG_CACHE; }
+function pushChangeLog(entry){
+  const log = CHANGELOG_CACHE.slice();
+  log.unshift(Object.assign({time: new Date().toLocaleString('ar-EG')}, entry));
+  if(log.length > 1000) log.length = 1000;
+  CHANGELOG_CACHE = log;
+  localStorage.setItem(CHANGELOG_KEY, JSON.stringify(log));
+  if(window.cloudSync) window.cloudSync.saveChangeLog(log);
+}
+/* Compares two rows field-by-field and returns only the differences. */
+function diffRowChanges(fields, oldRow, newRow){
+  const changes = [];
+  fields.forEach((label,i)=>{
+    const from = (oldRow[i]||'').toString();
+    const to = (newRow[i]||'').toString();
+    if(from !== to){
+      changes.push({field: label || ('حقل '+i), from, to});
+    }
+  });
+  return changes;
+}
+function getSession(){
+  try{ return JSON.parse(localStorage.getItem(SESSION_KEY)); }catch(e){ return null; }
+}
+function setSession(user){ localStorage.setItem(SESSION_KEY, JSON.stringify(user)); }
+function clearSession(){ localStorage.removeItem(SESSION_KEY); }
+
+function initAuth(){
+  const users = getUsers();
+  const loginErr = document.getElementById('loginErr');
+  loginErr.classList.remove('show'); loginErr.textContent='';
+  if(users.length === 0){
+    // first run: whoever opens the file sets up the Admin account
+    document.getElementById('loginTitle').textContent = '🛡 إعداد حساب المدير (Admin)';
+    document.getElementById('loginSub').textContent = 'لا يوجد حساب بعد على هذا الملف — أنشئ أول حساب وسيكون Admin تلقائيًا';
+    document.getElementById('loginPass2Row').style.display = 'block';
+    document.getElementById('loginActionBtn').textContent = 'إنشاء الحساب والدخول';
+    document.getElementById('loginHint').style.display = 'block';
+    document.getElementById('loginActionBtn').onclick = handleCreateAdmin;
+  } else {
+    const session = getSession();
+    if(session && users.some(u=> u.username===session.username)){
+      currentUser = session;
+      pushAccessLog({username: currentUser.username, role: currentUser.role, action: 'دخول (جلسة محفوظة)'});
+      enterApp();
+      return;
+    }
+    document.getElementById('loginTitle').textContent = '🔒 تسجيل الدخول';
+    document.getElementById('loginSub').textContent = 'من فضلك سجّل الدخول للوصول إلى ملف متابعة التسجيل';
+    document.getElementById('loginPass2Row').style.display = 'none';
+    document.getElementById('loginActionBtn').textContent = 'دخول';
+    document.getElementById('loginHint').style.display = 'none';
+    document.getElementById('loginActionBtn').onclick = handleLoginAction;
+  }
+  document.getElementById('loginOverlay').style.display = 'flex';
+}
+function showLoginError(msg){
+  const el = document.getElementById('loginErr');
+  el.textContent = msg; el.classList.add('show');
+}
+function handleCreateAdmin(){
+  const username = document.getElementById('loginUser').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  const pass2 = document.getElementById('loginPass2').value;
+  if(!username || !pass){ showLoginError('من فضلك اكتب اسم المستخدم وكلمة المرور'); return; }
+  if(pass.length < 4){ showLoginError('كلمة المرور قصيرة جدًا (4 أحرف على الأقل)'); return; }
+  if(pass !== pass2){ showLoginError('كلمتا المرور غير متطابقتين'); return; }
+  const users = [{username, passHash: simpleHash(pass), role: 'admin', createdAt: new Date().toLocaleString('ar-EG')}];
+  saveUsers(users);
+  currentUser = {username, role:'admin'};
+  setSession(currentUser);
+  pushAccessLog({username, role:'admin', action:'إنشاء الحساب وأول دخول (Admin)'});
+  enterApp();
+}
+/* Toggles a password input between hidden (dots) and plain text, e.g. so the
+   user can check what they typed if login fails or they forgot the password. */
+function togglePwField(id, btn){
+  const inp = document.getElementById(id);
+  if(!inp) return;
+  const willShow = inp.type === 'password';
+  inp.type = willShow ? 'text' : 'password';
+  btn.textContent = willShow ? '🙈' : '👁';
+  btn.title = willShow ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور';
+}
+function handleLoginAction(){
+  const username = document.getElementById('loginUser').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  if(!username || !pass){ showLoginError('من فضلك اكتب اسم المستخدم وكلمة المرور'); return; }
+  const users = getUsers();
+  const u = users.find(x=> x.username.toLowerCase() === username.toLowerCase());
+  if(!u || u.passHash !== simpleHash(pass)){
+    pushAccessLog({username: username||'(غير معروف)', role:'-', action:'محاولة دخول فاشلة'});
+    showLoginError('اسم المستخدم أو كلمة المرور غير صحيحة');
+    return;
+  }
+  currentUser = {username: u.username, role: u.role};
+  setSession(currentUser);
+  pushAccessLog({username: u.username, role: u.role, action:'دخول ناجح'});
+  enterApp();
+}
+function enterApp(){
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('loginUser').value=''; document.getElementById('loginPass').value='';
+  const badge = document.getElementById('userBadge');
+  badge.style.display = 'flex';
+  document.getElementById('userAvatar').textContent = (currentUser.username||'?').trim().charAt(0).toUpperCase();
+  document.getElementById('userNameLbl').textContent = currentUser.username;
+  document.getElementById('userRoleLbl').textContent = currentUser.role==='admin' ? 'مدير (Admin)' : 'مستخدم';
+  document.getElementById('adminPanelBtn').style.display = currentUser.role==='admin' ? 'block' : 'none';
+  currentCompany = Object.keys(DB)[0] || null;
+  appStarted = true;
+  renderAll();
+  runMigrations().then(()=>{
+    if(!DB[currentCompany]) currentCompany = Object.keys(DB)[0] || null;
+    renderAll();
+  });
+}
+function doLogout(){
+  if(!confirm('هل تريد تسجيل الخروج؟')) return;
+  pushAccessLog({username: currentUser ? currentUser.username : '-', role: currentUser ? currentUser.role : '-', action:'تسجيل خروج'});
+  clearSession();
+  currentUser = null;
+  document.getElementById('userBadge').style.display='none';
+  initAuth();
+}
+
+/* ---- Admin Panel: manage users + view access log ---- */
+function openAdminPanel(){
+  if(!currentUser || currentUser.role!=='admin'){ toast('هذه الصفحة لمديري النظام فقط'); return; }
+  renderAdminPanel();
+  document.getElementById('adminOverlay').classList.add('show');
+}
+function closeAdminPanel(){ document.getElementById('adminOverlay').classList.remove('show'); }
+function renderAdminPanel(){
+  const users = getUsers();
+  const log = getAccessLog();
+  const changeLog = getChangeLog();
+  const body = document.getElementById('adminBody');
+  const usersRows = users.map(u=>`
+    <tr>
+      <td>${esc(u.username)}</td>
+      <td><span class="role-pill ${u.role}">${u.role==='admin'?'Admin':'مستخدم'}</span></td>
+      <td>${esc(u.createdAt||'-')}</td>
+      <td>
+        <button class="btn btn-outline" style="padding:4px 9px;font-size:11.5px" onclick="adminResetPassword('${escAttr(u.username)}')">إعادة تعيين كلمة المرور</button>
+        ${u.username!==currentUser.username ? `<button class="btn btn-red" style="padding:4px 9px;font-size:11.5px" onclick="adminDeleteUser('${escAttr(u.username)}')">حذف</button>` : ''}
+      </td>
+    </tr>`).join('');
+  const logRows = log.slice(0,100).map(l=>`
+    <tr>
+      <td>${esc(l.username)}</td>
+      <td>${l.role && l.role!=='-' ? `<span class="role-pill ${l.role}">${l.role==='admin'?'Admin':'مستخدم'}</span>` : '-'}</td>
+      <td>${esc(l.action)}</td>
+      <td>${esc(l.time)}</td>
+    </tr>`).join('');
+  const changeRows = changeLog.slice(0,150).map(c=>{
+    const changesList = (c.changes||[]);
+    const shown = changesList.slice(0,6).map(ch=>
+      `<div class="change-item"><b>${esc(ch.field)}</b>: ${esc(ch.from)||'<i>فارغ</i>'} ← ${esc(ch.to)||'<i>فارغ</i>'}</div>`
+    ).join('');
+    const more = changesList.length>6 ? `<div class="change-item">... و ${changesList.length-6} تعديلات أخرى</div>` : '';
+    return `
+    <tr>
+      <td>${esc(c.username)}</td>
+      <td>${c.role && c.role!=='-' ? `<span class="role-pill ${c.role}">${c.role==='admin'?'Admin':'مستخدم'}</span>` : '-'}</td>
+      <td>${esc(c.company||'-')}</td>
+      <td>${esc(c.product||'-')}</td>
+      <td>${esc(c.action)}</td>
+      <td>${shown || '-'}${more}</td>
+      <td>${esc(c.time)}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = `
+    <div class="section-title">إدارة المستخدمين</div>
+    <div class="admin-add-row">
+      <div class="field-row"><label>اسم مستخدم جديد</label><input id="newUserName" placeholder="مثال: ahmed"></div>
+      <div class="field-row"><label>كلمة المرور</label><div class="pw-wrap"><input id="newUserPass" type="password"><button type="button" class="pw-toggle" tabindex="-1" title="إظهار كلمة المرور" onclick="togglePwField('newUserPass',this)">👁</button></div></div>
+      <div class="field-row" style="max-width:140px">
+        <label>الصلاحية</label>
+        <select id="newUserRole"><option value="user">مستخدم</option><option value="admin">Admin</option></select>
+      </div>
+      <button class="btn btn-gold" onclick="adminAddUser()">＋ إضافة</button>
+    </div>
+    <table class="data-table">
+      <thead><tr><th>اسم المستخدم</th><th>الصلاحية</th><th>تاريخ الإنشاء</th><th>إجراءات</th></tr></thead>
+      <tbody>${usersRows || '<tr><td colspan="4">لا يوجد مستخدمون</td></tr>'}</tbody>
+    </table>
+    <div class="section-title">سجل الدخول (آخر 100 عملية)</div>
+    <table class="data-table">
+      <thead><tr><th>اسم المستخدم</th><th>الصلاحية</th><th>الحدث</th><th>الوقت</th></tr></thead>
+      <tbody>${logRows || '<tr><td colspan="4">لا يوجد سجل بعد</td></tr>'}</tbody>
+    </table>
+    <div class="section-title">سجل التعديلات (آخر 150 عملية)</div>
+    <table class="data-table">
+      <thead><tr><th>اسم المستخدم</th><th>الصلاحية</th><th>الشركة</th><th>المنتج</th><th>الإجراء</th><th>التفاصيل</th><th>الوقت</th></tr></thead>
+      <tbody>${changeRows || '<tr><td colspan="7">لا يوجد تعديلات مسجّلة بعد</td></tr>'}</tbody>
+    </table>
+  `;
+}
+function adminAddUser(){
+  const username = document.getElementById('newUserName').value.trim();
+  const pass = document.getElementById('newUserPass').value;
+  const role = document.getElementById('newUserRole').value;
+  if(!username || !pass){ toast('اكتب اسم المستخدم وكلمة المرور'); return; }
+  if(pass.length < 4){ toast('كلمة المرور قصيرة جدًا'); return; }
+  const users = getUsers();
+  if(users.some(u=> u.username.toLowerCase()===username.toLowerCase())){ toast('اسم المستخدم موجود بالفعل'); return; }
+  users.push({username, passHash: simpleHash(pass), role, createdAt: new Date().toLocaleString('ar-EG')});
+  saveUsers(users);
+  pushAccessLog({username: currentUser.username, role: currentUser.role, action: `أضاف مستخدم جديد: ${username} (${role})`});
+  renderAdminPanel();
+  toast('تمت إضافة المستخدم ✓');
+}
+function adminDeleteUser(username){
+  if(!confirm(`هل تريد حذف المستخدم "${username}"؟`)) return;
+  let users = getUsers();
+  users = users.filter(u=> u.username !== username);
+  saveUsers(users);
+  pushAccessLog({username: currentUser.username, role: currentUser.role, action: `حذف المستخدم: ${username}`});
+  renderAdminPanel();
+  toast('تم حذف المستخدم');
+}
+function adminResetPassword(username){
+  const np = prompt(`كلمة مرور جديدة للمستخدم "${username}":`);
+  if(!np) return;
+  if(np.length < 4){ toast('كلمة المرور قصيرة جدًا'); return; }
+  const users = getUsers();
+  const u = users.find(x=> x.username===username);
+  if(!u) return;
+  u.passHash = simpleHash(np);
+  saveUsers(users);
+  pushAccessLog({username: currentUser.username, role: currentUser.role, action: `أعاد تعيين كلمة مرور: ${username}`});
+  toast('تم تغيير كلمة المرور ✓');
+}
+
+/* ============ ONE-TIME DATA MIGRATIONS ============ */
+/* Inserts a new field right after an existing reference field, for companies
+   that already have the reference field but not yet the new one.
+   Also shifts fieldIdx of any existing PDF attachments that come after the
+   insertion point, so they stay linked to the correct (shifted) field. */
+function migrateInsertFieldAfter(refLabel, newLabel, newGroup, newSub){
+  const tasks = [];
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    const refIdx = d.fields.findIndex(f=> (f||'').trim().toLowerCase() === refLabel.toLowerCase());
+    if(refIdx === -1) return;
+    const alreadyHas = (d.fields[refIdx+1]||'').trim().toLowerCase() === newLabel.toLowerCase();
+    if(alreadyHas) return;
+    const insertAt = refIdx + 1;
+    d.fields.splice(insertAt, 0, newLabel);
+    d.groups.splice(insertAt, 0, newGroup !== undefined ? newGroup : d.groups[refIdx]);
+    d.subs.splice(insertAt, 0, newSub !== undefined ? newSub : d.subs[refIdx]);
+    d.rows.forEach(row=> row.splice(insertAt, 0, ''));
+    // shift attachment fieldIdx for this company's rows
+    const ids = d.ids || [];
+    ids.forEach(rowId=>{
+      tasks.push(
+        getAttachments(rowId).then(list=>{
+          const toShift = list.filter(a=> a.fieldIdx >= insertAt);
+          return Promise.all(toShift.map(a=> shiftAttachmentFieldIdx(a.attId, a.fieldIdx + 1)));
+        })
+      );
+    });
+  });
+  return Promise.all(tasks).then(()=> saveDB());
+}
+function shiftAttachmentFieldIdx(attId, newFieldIdx){
+  const rec = ATTACHMENTS_STORE.find(a=> a.attId===attId);
+  if(!rec) return Promise.resolve();
+  rec.fieldIdx = newFieldIdx;
+  localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+  if(!window.cloudSync) return Promise.resolve();
+  return window.cloudSync.saveAttachment(rec);
+}
+/* Removes fields matching given labels (case-insensitive), for any company that has them.
+   Shifts attachment fieldIdx values down accordingly, and drops attachments that were
+   attached to a removed field. */
+function migrateRemoveFieldsByLabel(labels){
+  const wanted = labels.map(l=> l.trim().toLowerCase());
+  const tasks = [];
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    const ids = d.ids || [];
+    // remove from the end backwards so earlier indices stay valid while splicing
+    for(let i=d.fields.length-1; i>=0; i--){
+      if(!wanted.includes((d.fields[i]||'').trim().toLowerCase())) continue;
+      d.fields.splice(i,1);
+      d.groups.splice(i,1);
+      d.subs.splice(i,1);
+      d.rows.forEach(row=> row.splice(i,1));
+      ids.forEach(rowId=>{
+        tasks.push(
+          getAttachments(rowId).then(list=>{
+            const toDrop = list.filter(a=> a.fieldIdx === i);
+            const toShift = list.filter(a=> a.fieldIdx > i);
+            return Promise.all([
+              Promise.all(toDrop.map(a=> deleteAttachmentById(a.attId))),
+              Promise.all(toShift.map(a=> shiftAttachmentFieldIdx(a.attId, a.fieldIdx - 1)))
+            ]);
+          })
+        );
+      });
+    }
+  });
+  return Promise.all(tasks).then(()=> saveDB());
+}
+/* Inserts several new fields right after the first field matched by matchFn(field,group,sub,idx).
+   Skips a company if no match is found, or if the fields are already present (idempotent). */
+function migrateInsertFieldsAfterMatch(matchFn, newFields){
+  const tasks = [];
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    let refIdx = -1;
+    for(let i=0;i<d.fields.length;i++){
+      if(matchFn(d.fields[i], d.groups[i], d.subs[i], i)){ refIdx = i; break; }
+    }
+    if(refIdx === -1) return;
+    const already = newFields.every((nf,k)=> (d.fields[refIdx+1+k]||'').trim().toLowerCase() === nf.label.toLowerCase());
+    if(already) return;
+    let insertAt = refIdx + 1;
+    newFields.forEach(nf=>{
+      d.fields.splice(insertAt, 0, nf.label);
+      d.groups.splice(insertAt, 0, nf.group !== undefined ? nf.group : d.groups[refIdx]);
+      d.subs.splice(insertAt, 0, nf.sub !== undefined ? nf.sub : d.subs[refIdx]);
+      d.rows.forEach(row=> row.splice(insertAt, 0, ''));
+      insertAt++;
+    });
+    const shiftCount = newFields.length;
+    const shiftFrom = refIdx + 1;
+    const ids = d.ids || [];
+    ids.forEach(rowId=>{
+      tasks.push(
+        getAttachments(rowId).then(list=>{
+          const toShift = list.filter(a=> a.fieldIdx >= shiftFrom);
+          return Promise.all(toShift.map(a=> shiftAttachmentFieldIdx(a.attId, a.fieldIdx + shiftCount)));
+        })
+      );
+    });
+  });
+  return Promise.all(tasks).then(()=> saveDB());
+}
+/* Renames the first field matched by matchFn(field,group,sub,idx) to newLabel, per company. */
+function migrateRenameFieldsByMatch(matchFn, newLabel){
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    for(let i=0;i<d.fields.length;i++){
+      if(matchFn(d.fields[i], d.groups[i], d.subs[i], i)){
+        d.fields[i] = newLabel;
+        break;
+      }
+    }
+  });
+  saveDB();
+}
+/* Keeps only the first field matching `label` (case-insensitive) per company;
+   any later duplicates are merged into the first (first empty value wins from
+   the duplicate) and then removed, shifting attachment fieldIdx accordingly. */
+/* Changes the group (section) of every field matched by matchFn(field,group,sub,idx) to newGroup —
+   the field keeps its label, sub-section, and every row's stored value; only the section it's
+   displayed under changes. Use this to relocate a field between accordion sections. */
+function migrateChangeGroupByMatch(matchFn, newGroup){
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    d.fields.forEach((f,i)=>{
+      if(matchFn(f, d.groups[i], d.subs[i], i)) d.groups[i] = newGroup;
+    });
+  });
+  saveDB();
+}
+function migrateDedupeFieldKeepFirst(label){
+  const wanted = label.trim().toLowerCase();
+  const tasks = [];
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    const matches = [];
+    d.fields.forEach((f,i)=>{ if((f||'').trim().toLowerCase() === wanted) matches.push(i); });
+    if(matches.length < 2) return;
+    const keepIdx = matches[0];
+    const dropIdxs = matches.slice(1);
+    // merge values into the kept column before removing duplicates
+    d.rows.forEach(row=>{
+      dropIdxs.forEach(di=>{
+        if(!row[keepIdx] && row[di]) row[keepIdx] = row[di];
+      });
+    });
+    // remove duplicates from the end backwards so earlier indices stay valid
+    const ids = d.ids || [];
+    for(let k=dropIdxs.length-1; k>=0; k--){
+      const di = dropIdxs[k];
+      d.fields.splice(di,1);
+      d.groups.splice(di,1);
+      d.subs.splice(di,1);
+      d.rows.forEach(row=> row.splice(di,1));
+      ids.forEach(rowId=>{
+        tasks.push(
+          getAttachments(rowId).then(list=>{
+            const toDrop = list.filter(a=> a.fieldIdx === di);
+            const toShift = list.filter(a=> a.fieldIdx > di);
+            return Promise.all([
+              Promise.all(toDrop.map(a=> deleteAttachmentById(a.attId))),
+              Promise.all(toShift.map(a=> shiftAttachmentFieldIdx(a.attId, a.fieldIdx - 1)))
+            ]);
+          })
+        );
+      });
+    }
+  });
+  return Promise.all(tasks).then(()=> saveDB());
+}
+function migrateAppendFieldIfMissing(label, group, sub){
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    const has = d.fields.some(f=> (f||'').trim().toLowerCase() === label.toLowerCase());
+    if(has) return;
+    d.fields.push(label);
+    d.groups.push(group !== undefined ? group : 'عام');
+    d.subs.push(sub !== undefined ? sub : '');
+    d.rows.forEach(row=> row.push(''));
+  });
+  saveDB();
+}
+/* Adds a whole new company/table if it doesn't already exist — used for
+   introducing a brand-new company sheet without touching existing data. */
+function migrateAddCompanyIfMissing(name, companyData){
+  if(DB[name]) return;
+  DB[name] = companyData;
+  saveDB();
+}
+/* Removes an entire company/table (and its PDF attachments) if it exists —
+   used for retiring an old company sheet that was replaced by a new one. */
+function migrateRemoveCompanyByName(name){
+  if(!DB[name]) return Promise.resolve();
+  const ids = DB[name].ids || [];
+  delete DB[name];
+  saveDB();
+  return Promise.all(ids.map(id=> deleteAttachmentsForRow(id)));
+}
+function runMigrations(){
+  return migrateInsertFieldAfter('Committee Decision', 'Committee Decision Date')
+    .then(()=> migrateInsertFieldAfter('Product Name', 'GTIN No.'))
+    .then(()=> migrateAppendFieldIfMissing('product status', 'عام', ''))
+    // remove fields from an earlier iteration (composition/packaging), if they exist
+    .then(()=> migrateRemoveFieldsByLabel([
+      'بيان التركيب المبدئي','بيان التركيب النهائي','العبوة المبدئية','العبوة النهائية'
+    ]))
+    // Quality → Final license: add "تاريخ صدور الاخطار"
+    .then(()=> migrateInsertFieldsAfterMatch(
+      (f,g,s)=> (s||'').trim().toLowerCase() === 'final license',
+      [{label:'تاريخ صدور الاخطار'}]
+    ))
+    // Quality → Reg. follow up: add Listing/User dropdown after "API (listing - user )"
+    .then(()=> migrateInsertFieldsAfterMatch(
+      (f)=> (f||'').trim().toLowerCase() === 'api (listing - user )',
+      [{label:'Listing / User'}]
+    ))
+    // Quality → Reg. follow up: split S-Part components into their own fields
+    .then(()=> migrateInsertFieldsAfterMatch(
+      (f)=> (f||'').trim().toLowerCase() === 's-part (opened part -l.o.a - short cut from email eda - valid gmp - risk ass)',
+      [
+        {label:'Opened part'},
+        {label:'L.O.A'},
+        {label:'Short cut from Email EDA'},
+        {label:'Valid GMP'},
+        {label:'Risk ass'}
+      ]
+    ))
+    // Quality → Final license: rename the unlabeled license-number field to "Reg.NO"
+    .then(()=> migrateRenameFieldsByMatch(
+      (f,g,s)=> (s||'').trim().toLowerCase() === 'final license' && (f||'').trim() === '',
+      'Reg.NO'
+    ))
+    // rename "تاريخ صدور الاخطار" to "License Issue Date"
+    .then(()=> migrateRenameFieldsByMatch(
+      (f)=> (f||'').trim() === 'تاريخ صدور الاخطار',
+      'License Issue Date'
+    ))
+    // Quality → Reg. follow up: rename "API (listing - user )" to "Received Date from S.C"
+    .then(()=> migrateRenameFieldsByMatch(
+      (f)=> (f||'').trim().toLowerCase() === 'api (listing - user )',
+      'Received Date from S.C'
+    ))
+    // Quality → Reg. follow up: rename the S-Part field to "Submission Date"
+    .then(()=> migrateRenameFieldsByMatch(
+      (f)=> (f||'').trim().toLowerCase() === 's-part (opened part -l.o.a - short cut from email eda - valid gmp - risk ass)',
+      'Submission Date'
+    ))
+    // Quality → Final license: keep a single "License Issue Date" field only
+    .then(()=> migrateDedupeFieldKeepFirst('License Issue Date'))
+    // عام: add "Ref.Product Name", "SMPC" and "PIL" fields after GTIN No.
+    .then(()=> migrateInsertFieldsAfterMatch(
+      (f)=> (f||'').trim().toLowerCase() === 'gtin no.',
+      [
+        {label:'Ref.Product Name'},
+        {label:'SMPC'},
+        {label:'PIL'}
+      ]
+    ))
+    // retire "Biotech Pharma  reg" (launching-dates sheet) — replaced by "Biotech Pharma NFSA"
+    .then(()=> migrateRemoveCompanyByName('Biotech Pharma  reg'))
+    // Naming → Pricing: "Submission Date" and "Application No." are pricing follow-up fields, not naming
+    .then(()=> migrateChangeGroupByMatch(
+      (f,g,s)=> (g||'').trim().toLowerCase()==='naming'
+        && (s||'').trim().toLowerCase()==='reg. follow up'
+        && ['submission date','application no.'].includes((f||'').trim().toLowerCase()),
+      'Pricing'
+    ))
+    // Stability Status → B.E: fields 53-57 (the B.E-study columns that trailed off under
+    // the wrong section header) belong with the rest of the B.E group
+    .then(()=> migrateChangeGroupByMatch(
+      (f,g,s,i)=> [53,54,55,56,57].includes(i) && (g||'').trim().toLowerCase()==='stability status',
+      'B.E'
+    ))
+    // add the new "Biotech Pharma NFSA" company/table
+    .then(()=> migrateAddCompanyIfMissing('Biotech Pharma NFSA', {
+      groups: ['عام','عام','عام','عام','عام','عام','عام','عام','عام','عام'],
+      subs:   ['','','','','','','','','',''],
+      fields: ['S.No','Product Name','GTIN No','API','Ref.Product Name','Link of Ref.Product','Product Status','Reg. License','License Exp.Date','Note'],
+      rows: [
+        ['1','Triless HGC','6223015031249','EPA','','','Registered','4094/2022','23/08/2027','في انتظار تصنيع التشغيلات لمراجعة ملف اعادة التسجيل'],
+        ['2','Colla-PEA capsule','6223015031386','PEA+Boswellia extract +Undenatured collagen type 2','','','Registered','14234/2025','24/12/2030','في انتظار طلبات التفتيش من المصنع للموافقة علي إمكانية التصنيع في مصنع وادي النيل بنتا . - تم عمل عقد مع دوا ايجيبت لنقل المستحضر بعد انتاج أول التشغيلات في وادي النيل .'],
+        ['3','Neuroguard capsule','------','Quercetin','','','Under registration','','',''],
+        ['4','Neuropea plus caps','------','PEA+B1+B6+B12','','','Under registration','','',''],
+        ['6','DK Alpha','------','vit K2 &D3','','','Under registration','','',''],
+        ['7','CH Alpha','6223015030716','Collagen','','','Registered','2025/650 / R1','12/10/2030','Done'],
+        ['8','CH Alpha Plus','6223015030723','Collagen + rose hip','','','Registered','2025/651 / R1','12/10/2030','Done'],
+        ['9','Qyra','6225000366497','Collagen','','','Registered','2022/4082','22/08/2027','Done'],
+        ['10','Fortibone','6223015030730','Collagen +Ca + vit D3','','','Registered','2023/5155','14/01/2028','Done'],
+        ['11','Fortibone Junior','','Collagen +Ca + vit D3','','','Registered','2023/5569','26/02/2028','Done']
+      ]
+    }));
+}
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+/* ============ STATUS DETECTION ============ */
+function findFieldIndex(company, names){
+  const fields = DB[company].fields;
+  for(let i=0;i<fields.length;i++){
+    const f = (fields[i]||'').toLowerCase();
+    if(names.some(n=>f.includes(n))) return i;
+  }
+  return -1;
+}
+function getStatus(company, row){
+  const idx = findFieldIndex(company, ['product status']);
+  if(idx>=0 && row[idx]) return row[idx];
+  return '—';
+}
+function statusBadgeClass(status){
+  const s = (status||'').toLowerCase();
+  if(s.includes('register') && !s.includes('under')) return 'b-green';
+  if(s.includes('under') || s.includes('line extension')) return 'b-amber';
+  if(s.includes('block') || s.includes('reject')) return 'b-red';
+  return 'b-blue';
+}
+
+/* ============ LICENSE EXPIRY ALERTS (6 months before Exp.Date) ============ */
+const EXPIRY_ALERT_MONTHS = 6;
+function parseFlexibleDate(v){
+  if(!v) return null;
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return new Date(+m[1], +m[2]-1, +m[3]);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(m) return new Date(+m[3], +m[2]-1, +m[1]);
+  return null;
+}
+function getExpiryIdx(company){
+  return findFieldIndex(company, ['exp.date','exp date','expiry date','expiration date']);
+}
+function getCompanyExpiryAlerts(company){
+  const d = DB[company];
+  if(!d) return [];
+  const expIdx = getExpiryIdx(company);
+  if(expIdx < 0) return [];
+  const nameIdx = findFieldIndex(company, ['product name']);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const horizon = new Date(today); horizon.setMonth(horizon.getMonth() + EXPIRY_ALERT_MONTHS);
+  const alerts = [];
+  d.rows.forEach((r,i)=>{
+    const dt = parseFlexibleDate(r[expIdx]);
+    if(!dt) return;
+    if(dt <= horizon){
+      const daysLeft = Math.round((dt - today) / 86400000);
+      alerts.push({
+        company, rowIndex:i,
+        name: nameIdx>=0 ? (r[nameIdx]||'بدون اسم') : (r[1]||'بدون اسم'),
+        expDate: r[expIdx], daysLeft,
+        expired: daysLeft < 0
+      });
+    }
+  });
+  alerts.sort((a,b)=> a.daysLeft - b.daysLeft);
+  return alerts;
+}
+function getAllExpiryAlerts(){
+  let all = [];
+  Object.keys(DB).forEach(c=>{ all = all.concat(getCompanyExpiryAlerts(c)); });
+  all.sort((a,b)=> a.daysLeft - b.daysLeft);
+  return all;
+}
+
+/* ============ RENDER SIDEBAR ============ */
+function renderCompanies(){
+  const list = document.getElementById('companyList');
+  const names = Object.keys(DB);
+  if(!currentCompany || !DB[currentCompany]) currentCompany = names[0] || null;
+  list.innerHTML = names.map(n=>{
+    const cnt = DB[n].rows.length;
+    return `<div class="company-item ${n===currentCompany?'active':''}" onclick="selectCompany('${escAttr(n)}')">
+      <span>🏢 ${esc(n)}</span><span class="cnt">${cnt}</span>
+    </div>`;
+  }).join('') || '<div style="padding:14px;color:#b9c6d6;font-size:13px">لا توجد شركات بعد. أضف شركة جديدة.</div>';
+}
+function selectCompany(name){
+  currentCompany = name;
+  document.getElementById('sidebar').classList.remove('open');
+  renderAll();
+}
+
+/* ============ RENDER MAIN ============ */
+function renderAll(){
+  renderCompanies();
+  renderTopbar();
+  renderStats();
+  renderExpiryBanner();
+  renderSidebarAlertBadge();
+  renderProducts();
+}
+function renderTopbar(){
+  if(!currentCompany){ document.getElementById('companyTitle').textContent='لا توجد بيانات'; document.getElementById('companySub').textContent=''; return;}
+  document.getElementById('companyTitle').textContent = currentCompany;
+  document.getElementById('companySub').textContent = `${DB[currentCompany].rows.length} منتج مسجّل`;
+}
+function renderStats(){
+  const row = document.getElementById('statsRow');
+  if(!currentCompany){ row.innerHTML=''; return; }
+  const rows = DB[currentCompany].rows;
+  const sIdx = findFieldIndex(currentCompany, ['product status']);
+  let registered=0, underReg=0, other=0;
+  rows.forEach(r=>{
+    const s = (sIdx>=0? (r[sIdx]||'') : '').toLowerCase();
+    if(s.includes('register') && !s.includes('under')) registered++;
+    else if(s.includes('under') || s.includes('line extension')) underReg++;
+    else other++;
+  });
+  row.innerHTML = `
+    <div class="stat-card"><div class="num">${rows.length}</div><div class="lbl">إجمالي المنتجات</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--green)">${registered}</div><div class="lbl">مسجّلة بالكامل</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--amber)">${underReg}</div><div class="lbl">تحت التسجيل</div></div>
+    <div class="stat-card"><div class="num" style="color:var(--blue)">${other}</div><div class="lbl">حالات أخرى</div></div>
+  `;
+}
+function renderExpiryBanner(){
+  const el = document.getElementById('expiryBanner');
+  if(!currentCompany){ el.innerHTML=''; return; }
+  const alerts = getCompanyExpiryAlerts(currentCompany);
+  if(!alerts.length){ el.innerHTML=''; return; }
+  const hasExpired = alerts.some(a=> a.expired);
+  const items = alerts.map(a=>{
+    const cls = a.expired ? 'danger' : 'warn';
+    const daysLbl = a.expired ? `منتهي منذ ${Math.abs(a.daysLeft)} يوم` : `باقي ${a.daysLeft} يوم`;
+    return `<div class="expiry-item" onclick="openProduct(${a.rowIndex})">
+      <div>
+        <div class="ei-name">${a.expired?'⛔':'⏰'} ${esc(a.name)}</div>
+        <div class="ei-meta">تاريخ الانتهاء: ${esc(a.expDate)}</div>
+      </div>
+      <span class="ei-days ${cls}">${daysLbl}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div class="expiry-banner ${hasExpired?'has-expired':''}">
+    <div class="eb-title">${hasExpired?'⛔':'⏰'} تنبيه انتهاء ترخيص — ${alerts.length} منتج (خلال ${EXPIRY_ALERT_MONTHS} أشهر القادمة أو منتهي بالفعل)</div>
+    <div class="expiry-list">${items}</div>
+  </div>`;
+}
+function renderSidebarAlertBadge(){
+  const el = document.getElementById('sidebarAlertBadge');
+  const all = getAllExpiryAlerts();
+  if(!all.length){ el.innerHTML=''; return; }
+  const hasExpired = all.some(a=>a.expired);
+  el.innerHTML = `<div class="sidebar-alert-badge" onclick="${all[0] ? `selectCompany('${escAttr(all[0].company)}')` : ''}">
+    <span>${hasExpired?'⛔':'⏰'}</span>
+    <span>${all.length} منتج رخصته هتنتهي خلال ${EXPIRY_ALERT_MONTHS} أشهر (في كل الشركات)</span>
+  </div>`;
+}
+function renderProducts(){
+  const grid = document.getElementById('productsGrid');
+  if(!currentCompany){ grid.innerHTML = `<div class="empty"><div class="icon">📂</div>ابدأ بإضافة شركة جديدة أو استيراد ملف Excel</div>`; return; }
+  const data = DB[currentCompany];
+  const q = (document.getElementById('searchInput').value||'').trim().toLowerCase();
+  const nameIdx = findFieldIndex(currentCompany,['product name']);
+  const apiIdx = findFieldIndex(currentCompany,['api']);
+  const decreeIdx = findFieldIndex(currentCompany,['decree']);
+  const statusIdx = findFieldIndex(currentCompany,['product status']);
+  const gtinIdx = findFieldIndex(currentCompany,['gtin']);
+
+  const expIdx = getExpiryIdx(currentCompany);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const horizon = new Date(today); horizon.setMonth(horizon.getMonth() + EXPIRY_ALERT_MONTHS);
+
+  let rows = data.rows.map((r,i)=>({r,i}));
+  if(q){
+    rows = rows.filter(({r})=> r.some(v=> (v||'').toLowerCase().includes(q)));
+  }
+  if(rows.length===0){
+    grid.innerHTML = `<div class="empty"><div class="icon">🔍</div>لا توجد نتائج مطابقة</div>`;
+    return;
+  }
+  grid.innerHTML = rows.map(({r,i})=>{
+    const name = nameIdx>=0? (r[nameIdx]||'بدون اسم') : (r[1]||'بدون اسم');
+    const api = apiIdx>=0? (r[apiIdx]||'') : (r[2]||'');
+    const decree = decreeIdx>=0 ? (r[decreeIdx]||'') : '';
+    const status = statusIdx>=0 ? (r[statusIdx]||'—') : '—';
+    const gtin = gtinIdx>=0 ? (r[gtinIdx]||'') : '';
+    let expCls = '', expFlag = '';
+    if(expIdx>=0){
+      const dt = parseFlexibleDate(r[expIdx]);
+      if(dt && dt <= horizon){
+        const expired = dt < today;
+        expCls = expired ? 'expired-license' : 'expiring';
+        expFlag = `<div class="exp-flag" title="${expired?'انتهى الترخيص':'الترخيص هينتهي قريبًا'}">${expired?'⛔':'⏰'}</div>`;
+      }
+    }
+    return `<div class="pcard ${expCls}" onclick="openProduct(${i})">
+      ${expFlag}
+      <div class="pname">${esc(name)}</div>
+      <div class="papi">${esc(api)}</div>
+      <span class="badge ${statusBadgeClass(status)}">${esc(status||'—')}</span>
+      <div class="meta"><span>${decree?('قرار: '+esc(decree)):''}</span><span>#${i+1}</span></div>
+      ${gtin ? `<div class="gtin-wrap"><svg id="card-gtin-${i}"></svg><div class="gtin-num">${esc(gtin)}</div></div>` : ''}
+      <div class="att-indicator" id="att-ind-${i}"></div>
+    </div>`;
+  }).join('');
+  // render card barcodes
+  rows.forEach(({r,i})=>{
+    if(gtinIdx<0) return;
+    const val = r[gtinIdx];
+    if(!val) return;
+    const svg = document.getElementById('card-gtin-'+i);
+    renderBarcodeInto(svg, val);
+  });
+  // lazy-load attachment counts (async, non-blocking)
+  rows.forEach(({i})=>{
+    const rowId = (data.ids && data.ids[i]) ? data.ids[i] : null;
+    if(!rowId) return;
+    getAttachments(rowId).then(list=>{
+      if(!list.length) return;
+      const el = document.getElementById('att-ind-'+i);
+      if(el) el.innerHTML = `<span style="font-size:11.5px;color:var(--navy)">📎 ${list.length} مرفق</span>`;
+    });
+  });
+}
+
+function esc(s){ return (s===undefined||s===null)?'':String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escAttr(s){ return esc(s).replace(/'/g,"\\'"); }
+
+/* ============ MODAL: PRODUCT EDIT ============ */
+function sectionTitle(group, sub){
+  const g = group || 'عام';
+  const s = (sub||'').trim();
+  if(s.toLowerCase() === 'note') return 'Note';
+  return g + (s? ' - ' + s : '');
+}
+function buildSections(company){
+  const d = DB[company];
+  const sections = [];
+  let lastKey = null;
+  d.fields.forEach((f,i)=>{
+    const key = (d.groups[i]||'عام') + '|' + (d.subs[i]||'');
+    if(key !== lastKey){
+      sections.push({title: sectionTitle(d.groups[i], d.subs[i]), idxs:[]});
+      lastKey = key;
+    }
+    sections[sections.length-1].idxs.push(i);
+  });
+  return sections;
+}
+function isDateField(label){
+  const l = (label||'').toLowerCase();
+  return l.includes('date') || l.includes('exp.');
+}
+function isLicenseIssueDateField(label){
+  return (label||'').trim().toLowerCase() === 'license issue date';
+}
+/* Converts a stored ISO date (yyyy-mm-dd) into dd/mm/yyyy for display.
+   Falls back to returning the raw value untouched if it isn't ISO. */
+function toDisplayDDMMYYYY(v){
+  if(!v) return '';
+  const m = String(v).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return `${m[3]}/${m[2]}/${m[1]}`;
+  return v;
+}
+/* Converts a dd/mm/yyyy string back into ISO yyyy-mm-dd for storage.
+   Leaves the value untouched if it doesn't match the expected pattern. */
+function fromDisplayDDMMYYYYToISO(v){
+  if(!v) return '';
+  const m = String(v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(!m) return v;
+  const dd = m[1].padStart(2,'0'), mm = m[2].padStart(2,'0'), yyyy = m[3];
+  return `${yyyy}-${mm}-${dd}`;
+}
+/* Lightweight input mask: keeps only digits, auto-inserts '/' after
+   day and month, caps length at dd/mm/yyyy (10 chars). */
+function maskDDMMYYYY(inputEl){
+  let digits = inputEl.value.replace(/[^\d]/g,'').slice(0,8);
+  let out = digits;
+  if(digits.length > 4) out = digits.slice(0,2) + '/' + digits.slice(2,4) + '/' + digits.slice(4);
+  else if(digits.length > 2) out = digits.slice(0,2) + '/' + digits.slice(2);
+  inputEl.value = out;
+}
+function isGtinField(label){
+  return (label||'').toLowerCase().includes('gtin');
+}
+function isStatusField(label){
+  return (label||'').trim().toLowerCase() === 'product status';
+}
+function isListingUserField(label){
+  return (label||'').trim().toLowerCase() === 'listing / user';
+}
+function renderBarcodeInto(svgEl, value){
+  if(!svgEl) return;
+  if(!value || !window.JsBarcode){ svgEl.innerHTML=''; return; }
+  try{
+    JsBarcode(svgEl, String(value), {format:'CODE128', displayValue:false, height:34, margin:0});
+  }catch(e){ svgEl.innerHTML=''; }
+}
+function openProduct(index){
+  editingRowIndex = index;
+  currentRowId = ensureRowId(currentCompany, index);
+  document.getElementById('modalTitle').textContent = 'تعديل بيانات المنتج';
+  document.getElementById('delProductBtn').style.display='inline-flex';
+  renderModalBody();
+  document.getElementById('modalOverlay').classList.add('show');
+}
+function openNewProduct(){
+  if(!currentCompany){ toast('أضف شركة أولاً'); return; }
+  editingRowIndex = null;
+  currentRowId = null;
+  document.getElementById('modalTitle').textContent = 'إضافة منتج جديد';
+  document.getElementById('delProductBtn').style.display='none';
+  renderModalBody();
+  document.getElementById('modalOverlay').classList.add('show');
+}
+function closeModal(){ document.getElementById('modalOverlay').classList.remove('show'); }
+
+let attachmentsCache = []; // attachments of the currently open product, loaded once per open
+
+function renderModalBody(){
+  const d = DB[currentCompany];
+  const row = editingRowIndex!==null ? d.rows[editingRowIndex] : d.fields.map(()=> '');
+  const sections = buildSections(currentCompany);
+  const body = document.getElementById('modalBody');
+  const canAttach = editingRowIndex!==null;
+
+  const fieldsBlock = sections.map(sec=>{
+    const fieldsHtml = sec.idxs.map(i=>{
+      const label = d.fields[i] || ('حقل '+i);
+      const val = row[i] || '';
+      const licenseDate = isLicenseIssueDateField(label);
+      const type = licenseDate ? 'text' : (isDateField(label) ? 'date' : 'text');
+      const dateVal = type==='date' ? toDateInputValue(val) : '';
+      const gtin = isGtinField(label);
+      const statusField = isStatusField(label);
+      const listingUser = isListingUserField(label);
+      if(listingUser){
+        const opts = ['','Listing','User'];
+        const optsHtml = opts.map(o=> `<option value="${escAttr(o)}" ${val===o?'selected':''}>${o===''?'—':o}</option>`).join('');
+        return `<div class="field-row">
+          <div class="field-label-row">
+            <label>${esc(label)}</label>
+            ${canAttach ? `<button type="button" class="att-clip" onclick="toggleFieldAttachments(${i})">
+                📎 <span id="att-count-${i}">0</span>
+              </button>` : ''}
+          </div>
+          <select data-idx="${i}">${optsHtml}</select>
+          ${canAttach ? `<div class="field-att-panel" id="field-att-${i}" style="display:none"></div>` : ''}
+        </div>`;
+      }
+      return `<div class="field-row">
+        <div class="field-label-row">
+          <label>${esc(label)}</label>
+          ${canAttach ? `<button type="button" class="att-clip" onclick="toggleFieldAttachments(${i})">
+              📎 <span id="att-count-${i}">0</span>
+            </button>` : ''}
+        </div>
+        <input type="${type}" data-idx="${i}" ${licenseDate?'data-datefield="license-issue"':''} value="${esc(licenseDate ? toDisplayDDMMYYYY(val) : (type==='date'?dateVal:val))}" ${licenseDate?'placeholder="dd/mm/yyyy" maxlength="10" inputmode="numeric" oninput="maskDDMMYYYY(this)"':''} ${statusField?'list="statusSuggestions"':''} ${gtin?`oninput="onGtinInput(this,${i})"`:''}>
+        ${gtin ? `<div class="field-gtin-preview"><svg id="gtin-svg-${i}"></svg><div class="gtin-num">${esc(val)}</div></div>` : ''}
+        ${canAttach ? `<div class="field-att-panel" id="field-att-${i}" style="display:none"></div>` : ''}
+      </div>`;
+    }).join('');
+    return `<div class="section-title">${esc(sec.title)}</div><div class="two-col">${fieldsHtml}</div>`;
+  }).join('');
+
+  const note = canAttach
+    ? `<div class="hint-box">📎 يمكنك إرفاق نسخة PDF من الموافقة أو الخطاب الصادر بجانب كل مرحلة من مراحل التسجيل — اضغط على أيقونة الدبوس بجوار اسم المرحلة.</div>`
+    : `<div class="hint-box">احفظ المنتج أولاً، ثم افتحه مرة أخرى لإضافة مرفقات PDF لكل مرحلة من مراحل التسجيل.</div>`;
+
+  const statusOptions = `<datalist id="statusSuggestions">
+      <option value="Registered"></option>
+      <option value="Under registration"></option>
+      <option value="Line extension"></option>
+      <option value="Blocked"></option>
+    </datalist>`;
+
+  body.innerHTML = note + fieldsBlock + statusOptions;
+
+  // render barcode previews for any GTIN fields already containing a value
+  d.fields.forEach((f,i)=>{
+    if(isGtinField(f)){
+      const svg = document.getElementById('gtin-svg-'+i);
+      renderBarcodeInto(svg, row[i]);
+    }
+  });
+
+  if(canAttach && currentRowId){
+    getAttachments(currentRowId).then(list=>{
+      attachmentsCache = list;
+      list.forEach(a=>{
+        const badge = document.getElementById('att-count-'+a.fieldIdx);
+        // count will be recalculated below in one pass instead
+      });
+      refreshAllFieldBadges();
+    });
+  } else {
+    attachmentsCache = [];
+  }
+}
+function refreshAllFieldBadges(){
+  const counts = {};
+  attachmentsCache.forEach(a=>{ counts[a.fieldIdx] = (counts[a.fieldIdx]||0) + 1; });
+  Object.keys(counts).forEach(idx=>{
+    const el = document.getElementById('att-count-'+idx);
+    if(el){
+      el.textContent = counts[idx];
+      el.closest('.att-clip').classList.add('has-att');
+    }
+  });
+}
+function toggleFieldAttachments(idx){
+  const panel = document.getElementById('field-att-'+idx);
+  if(!panel) return;
+  const isOpen = panel.style.display !== 'none';
+  // close all other panels for cleanliness
+  document.querySelectorAll('.field-att-panel').forEach(p=> p.style.display='none');
+  if(isOpen){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  renderFieldAttPanel(idx);
+}
+function renderFieldAttPanel(idx){
+  const panel = document.getElementById('field-att-'+idx);
+  if(!panel) return;
+  const list = attachmentsCache.filter(a=> a.fieldIdx === idx);
+  const fieldLabel = DB[currentCompany].fields[idx] || '';
+  const itemsHtml = list.length ? list.map(a=>`
+    <div class="att-item">
+      <span class="att-name">📄 ${esc(a.name)}</span>
+      <span class="att-meta">${a.sizeKB} ك.ب · ${a.date}</span>
+      <span class="att-actions">
+        <button class="btn btn-outline" onclick="viewAttachment('${a.attId}')">عرض</button>
+        <button class="btn btn-outline" onclick="downloadAttachment('${a.attId}')">تنزيل</button>
+        <button class="btn btn-red" onclick="removeAttachment('${a.attId}',${idx})">حذف</button>
+      </span>
+    </div>`).join('') : `<div class="att-empty">لا توجد مرفقات لهذه المرحلة بعد</div>`;
+  panel.innerHTML = `
+    ${itemsHtml}
+    <label class="btn btn-outline att-upload-btn">
+      ＋ إرفاق PDF لمرحلة "${esc(fieldLabel)}"
+      <input type="file" accept="application/pdf" multiple style="display:none" onchange="handleFieldAttachmentUpload(event, ${idx})">
+    </label>`;
+}
+function handleFieldAttachmentUpload(e, idx){
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  if(!currentRowId){ toast('احفظ المنتج أولاً'); return; }
+  const fieldLabel = DB[currentCompany].fields[idx] || '';
+  const validFiles = files.filter(f=>{
+    if(f.type !== 'application/pdf'){ toast(`تم تجاهل "${f.name}" — يجب أن يكون الملف PDF`); return false; }
+    return true;
+  });
+  if(!validFiles.length){ e.target.value=''; return; }
+  toast(validFiles.length>1 ? `جارٍ رفع ${validFiles.length} ملفات...` : 'جارٍ رفع الملف...');
+  Promise.all(validFiles.map(f=>
+    fileToDataUrl(f).then(dataUrl=> addAttachment(currentRowId, idx, fieldLabel, f.name, dataUrl, Math.round(f.size/1024)))
+  )).then(()=>{
+    return getAttachments(currentRowId);
+  }).then(list=>{
+    attachmentsCache = list;
+    refreshAllFieldBadges();
+    renderFieldAttPanel(idx);
+    toast('تم إرفاق الملف بنجاح — وسيظهر لباقي المستخدمين تلقائيًا ✓');
+    if(currentUser){
+      const nameIdx = findFieldIndex(currentCompany, ['product name']);
+      const rowArr = editingRowIndex!==null ? DB[currentCompany].rows[editingRowIndex] : null;
+      const productName = (rowArr && nameIdx>=0 && rowArr[nameIdx]) ? rowArr[nameIdx] : '(بدون اسم)';
+      pushChangeLog({
+        username: currentUser.username, role: currentUser.role,
+        company: currentCompany, product: productName,
+        action: 'رفع مرفق',
+        changes: validFiles.map(f=> ({field: fieldLabel, from:'', to: f.name}))
+      });
+    }
+  }).catch(err=>{
+    console.warn('attachment upload failed', err);
+    toast('تعذر رفع المرفق — تأكد من الاتصال بالإنترنت وحاول تاني');
+  });
+  e.target.value = '';
+}
+function getAttachmentById(attId){
+  return Promise.resolve(attachmentsCache.find(a=> a.attId===attId));
+}
+function viewAttachment(attId){
+  getAttachmentById(attId).then(a=>{
+    if(!a || !a.url){ toast('تعذر فتح المرفق'); return; }
+    window.open(a.url, '_blank');
+  });
+}
+function downloadAttachment(attId){
+  getAttachmentById(attId).then(a=>{
+    if(!a || !a.url){ toast('تعذر تنزيل المرفق'); return; }
+    // "download" query param makes Supabase Storage send the file with a
+    // Content-Disposition that forces a real download (needed since the
+    // <a download> attribute is ignored for cross-origin links)
+    const url = a.url + (a.url.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(a.name);
+    const link = document.createElement('a');
+    link.href = url; link.download = a.name; link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  });
+}
+function removeAttachment(attId, idx){
+  if(!confirm('هل تريد حذف هذا المرفق؟')) return;
+  const existing = attachmentsCache.find(a=> a.attId===attId);
+  deleteAttachmentById(attId).then(()=> getAttachments(currentRowId)).then(list=>{
+    attachmentsCache = list;
+    refreshAllFieldBadges();
+    // reset count badge to 0 visually if no attachments left for this field
+    const counts = {};
+    attachmentsCache.forEach(a=>{ counts[a.fieldIdx] = (counts[a.fieldIdx]||0) + 1; });
+    document.querySelectorAll('.att-clip').forEach(btn=> btn.classList.remove('has-att'));
+    Object.keys(counts).forEach(i=>{
+      const el = document.getElementById('att-count-'+i);
+      if(el) el.closest('.att-clip').classList.add('has-att');
+    });
+    document.querySelectorAll('[id^="att-count-"]').forEach(el=>{
+      const fIdx = el.id.replace('att-count-','');
+      el.textContent = counts[fIdx] || 0;
+    });
+    renderFieldAttPanel(idx);
+    toast('تم حذف المرفق');
+    if(currentUser && existing){
+      const nameIdx = findFieldIndex(currentCompany, ['product name']);
+      const rowArr = editingRowIndex!==null ? DB[currentCompany].rows[editingRowIndex] : null;
+      const productName = (rowArr && nameIdx>=0 && rowArr[nameIdx]) ? rowArr[nameIdx] : '(بدون اسم)';
+      pushChangeLog({
+        username: currentUser.username, role: currentUser.role,
+        company: currentCompany, product: productName,
+        action: 'حذف مرفق',
+        changes: [{field: existing.fieldLabel || '', from: existing.name, to: ''}]
+      });
+    }
+  });
+}
+function onGtinInput(inputEl, idx){
+  const svg = document.getElementById('gtin-svg-'+idx);
+  renderBarcodeInto(svg, inputEl.value);
+  const numEl = inputEl.parentElement.querySelector('.gtin-num');
+  if(numEl) numEl.textContent = inputEl.value || '';
+}
+function toDateInputValue(v){
+  if(!v) return '';
+  const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? v : '';
+}
+function saveProduct(){
+  const d = DB[currentCompany];
+  const inputs = document.querySelectorAll('#modalBody input[data-idx], #modalBody select[data-idx]');
+  const oldRow = editingRowIndex!==null ? [...d.rows[editingRowIndex]] : d.fields.map(()=> '');
+  const newRow = [...oldRow];
+  inputs.forEach(inp=>{
+    const idx = parseInt(inp.dataset.idx);
+    newRow[idx] = inp.dataset.datefield==='license-issue' ? fromDisplayDDMMYYYYToISO(inp.value) : inp.value;
+  });
+  let wasNew = editingRowIndex===null;
+  if(editingRowIndex!==null){
+    d.rows[editingRowIndex] = newRow;
+  } else {
+    d.rows.push(newRow);
+    editingRowIndex = d.rows.length - 1;
+  }
+  ensureRowId(currentCompany, editingRowIndex);
+  saveDB();
+  const changes = diffRowChanges(d.fields, oldRow, newRow);
+  if(changes.length && currentUser){
+    const nameIdx = findFieldIndex(currentCompany, ['product name']);
+    const productName = (nameIdx>=0 && newRow[nameIdx]) ? newRow[nameIdx] : '(بدون اسم)';
+    pushChangeLog({
+      username: currentUser.username, role: currentUser.role,
+      company: currentCompany, product: productName,
+      action: wasNew ? 'إضافة منتج جديد' : 'تعديل بيانات منتج',
+      changes
+    });
+  }
+  if(wasNew){
+    // reopen so user can add attachments without losing context
+    currentRowId = ensureRowId(currentCompany, editingRowIndex);
+    document.getElementById('modalTitle').textContent = 'تعديل بيانات المنتج';
+    document.getElementById('delProductBtn').style.display='inline-flex';
+    renderModalBody();
+    renderAll();
+    toast('تم الحفظ — يمكنك الآن إضافة المرفقات ✓');
+    return;
+  }
+  closeModal();
+  renderAll();
+  toast('تم الحفظ بنجاح ✓');
+}
+function deleteProduct(){
+  if(editingRowIndex===null) return;
+  if(!confirm('هل أنت متأكد من حذف هذا المنتج؟ سيتم حذف مرفقاته أيضًا.')) return;
+  const d = DB[currentCompany];
+  const rowId = d.ids ? d.ids[editingRowIndex] : null;
+  const nameIdx = findFieldIndex(currentCompany, ['product name']);
+  const productName = (nameIdx>=0 && d.rows[editingRowIndex][nameIdx]) ? d.rows[editingRowIndex][nameIdx] : '(بدون اسم)';
+  d.rows.splice(editingRowIndex,1);
+  if(d.ids) d.ids.splice(editingRowIndex,1);
+  saveDB();
+  if(currentUser){
+    pushChangeLog({username: currentUser.username, role: currentUser.role, company: currentCompany, product: productName, action: 'حذف منتج', changes: []});
+  }
+  if(rowId) deleteAttachmentsForRow(rowId);
+  closeModal();
+  renderAll();
+  toast('تم حذف المنتج');
+}
+
+/* ============ NEW COMPANY ============ */
+function openNewCompany(){
+  const name = prompt('اسم الشركة / الملف الجديد:');
+  if(!name) return;
+  if(DB[name]){ toast('هذه الشركة موجودة بالفعل'); return; }
+  DB[name] = {
+    groups: ['عام','عام','عام','عام','عام','عام','عام','عام','عام'],
+    subs: ['','','','','','','','',''],
+    fields: ['S.No','Product Name','GTIN No.','Ref.Product Name','SMPC','PIL','API','Decree','product status'],
+    rows: []
+  };
+  saveDB();
+  currentCompany = name;
+  if(currentUser){
+    pushChangeLog({username: currentUser.username, role: currentUser.role, company: name, product: '-', action: 'إنشاء شركة جديدة', changes: []});
+  }
+  renderAll();
+  toast('تم إنشاء شركة جديدة، ابدأ بإضافة المنتجات');
+}
+function deleteCurrentCompany(){
+  if(!currentCompany) return;
+  if(!confirm(`هل أنت متأكد من حذف شركة "${currentCompany}" وكل بياناتها ومرفقاتها؟`)) return;
+  const ids = DB[currentCompany].ids || [];
+  const deletedName = currentCompany;
+  const deletedRowCount = DB[currentCompany].rows.length;
+  delete DB[currentCompany];
+  currentCompany = Object.keys(DB)[0] || null;
+  saveDB();
+  Promise.all(ids.map(id=> deleteAttachmentsForRow(id)));
+  if(currentUser){
+    pushChangeLog({username: currentUser.username, role: currentUser.role, company: deletedName, product: '-', action: `حذف شركة (${deletedRowCount} منتج)`, changes: []});
+  }
+  renderAll();
+  toast('تم حذف الشركة');
+}
+
+/* ============ IMPORT EXCEL ============ */
+function handleImportExcel(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt){
+    const wb = XLSX.read(evt.target.result, {type:'binary', cellDates:true});
+    wb.SheetNames.forEach(sheetName=>{
+      const ws = wb.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false, dateNF:'yyyy-mm-dd'});
+      // find header row containing 'S.No'
+      let headerIdx = -1;
+      for(let i=0;i<Math.min(rows.length,6);i++){
+        if(rows[i] && rows[i][0] && String(rows[i][0]).trim()==='S.No'){ headerIdx=i; break; }
+      }
+      if(headerIdx===-1) return;
+      const groupRow = headerIdx>=2 ? rows[headerIdx-2] : [];
+      const subRow = headerIdx>=1 ? rows[headerIdx-1] : [];
+      const fieldRow = rows[headerIdx];
+      const ncols = fieldRow.length;
+      const groups=[]; let lastG='';
+      for(let i=0;i<ncols;i++){ const g=(groupRow[i]||'').toString().trim(); if(g) lastG=g; groups.push(lastG); }
+      const subs=[]; let lastS='';
+      for(let i=0;i<ncols;i++){ const s=(subRow[i]||'').toString().trim(); if(s) lastS=s; subs.push(lastS); }
+      const fields = fieldRow.map(f=>(f||'').toString().trim());
+      const dataRows = [];
+      for(let r=headerIdx+1;r<rows.length;r++){
+        const row = rows[r];
+        if(!row || row.every(c=>c===undefined||c===null||c==='')) continue;
+        const obj = [];
+        for(let i=0;i<ncols;i++) obj.push(row[i]!==undefined && row[i]!==null ? String(row[i]) : '');
+        dataRows.push(obj);
+      }
+      const finalName = sheetName.trim();
+      DB[finalName] = {groups, subs, fields, rows: dataRows};
+      if(currentUser){
+        pushChangeLog({username: currentUser.username, role: currentUser.role, company: finalName, product: '-', action: `استيراد من Excel (${dataRows.length} صف)`, changes: []});
+      }
+    });
+    saveDB();
+    currentCompany = Object.keys(DB)[Object.keys(DB).length-1];
+    renderAll();
+    toast('تم استيراد الملف بنجاح ✓');
+  };
+  reader.readAsBinaryString(file);
+  e.target.value = '';
+}
+
+/* ============ BACKUP / RESTORE ============ */
+function exportBackup(){
+  const blob = new Blob([JSON.stringify(DB, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  a.href = url; a.download = `نسخة-احتياطية-تسجيل-الادوية-${ts}.json`;
+  a.click();
+  toast('تم تنزيل النسخة الاحتياطية');
+}
+function handleRestore(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt){
+    try{
+      const data = JSON.parse(evt.target.result);
+      DB = data;
+      saveDB();
+      currentCompany = Object.keys(DB)[0] || null;
+      if(currentUser){
+        pushChangeLog({username: currentUser.username, role: currentUser.role, company: '-', product: '-', action: `استعادة نسخة احتياطية كاملة (${Object.keys(DB).length} شركة)`, changes: []});
+      }
+      renderAll();
+      toast('تم استعادة النسخة الاحتياطية بنجاح ✓');
+    }catch(err){
+      alert('ملف غير صالح');
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+/* ============ PDF EXPORT ============ */
+function exportCompanyPDF(){
+  if(!currentCompany){ toast('اختر شركة أولاً'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'landscape'});
+  const d = DB[currentCompany];
+  const nameIdx = findFieldIndex(currentCompany,['product name']);
+  const apiIdx = findFieldIndex(currentCompany,['api']);
+  const statusIdx = findFieldIndex(currentCompany,['product status']);
+  const decreeIdx = findFieldIndex(currentCompany,['decree']);
+  const gtinIdx = findFieldIndex(currentCompany,['gtin']);
+  doc.setFontSize(14);
+  doc.text(`Product Registration Status - ${currentCompany}`, 14, 14);
+  const head = [['#','Product Name','API','GTIN','Decree','Status']];
+  const body = d.rows.map((r,i)=>[
+    i+1,
+    nameIdx>=0?r[nameIdx]:r[1],
+    apiIdx>=0?r[apiIdx]:r[2],
+    gtinIdx>=0?r[gtinIdx]:'',
+    decreeIdx>=0?r[decreeIdx]:'',
+    statusIdx>=0?r[statusIdx]:''
+  ]);
+  doc.autoTable({head, body, startY:20, styles:{fontSize:9}});
+  doc.save(`${currentCompany}-registration-status.pdf`);
+  toast('تم تصدير ملف PDF');
+}
+
+/* ============ REPORTS ============ */
+function companyStats(company){
+  const d = DB[company];
+  const sIdx = findFieldIndex(company, ['product status']);
+  let registered=0, underReg=0, other=0;
+  d.rows.forEach(r=>{
+    const s = (sIdx>=0? (r[sIdx]||'') : '').toLowerCase();
+    if(s.includes('register') && !s.includes('under')) registered++;
+    else if(s.includes('under') || s.includes('line extension')) underReg++;
+    else other++;
+  });
+  return {company, total: d.rows.length, registered, underReg, other};
+}
+function allCompanyStats(){
+  return Object.keys(DB).map(c=> companyStats(c));
+}
+function openReports(){
+  renderReportsBody();
+  document.getElementById('reportsOverlay').classList.add('show');
+}
+function closeReports(){ document.getElementById('reportsOverlay').classList.remove('show'); }
+function renderReportsBody(){
+  const body = document.getElementById('reportsBody');
+  const stats = allCompanyStats();
+  const grand = stats.reduce((acc,s)=>({total:acc.total+s.total, registered:acc.registered+s.registered, underReg:acc.underReg+s.underReg, other:acc.other+s.other}), {total:0,registered:0,underReg:0,other:0});
+  const rows = stats.map(s=>`
+    <tr>
+      <td>${esc(s.company)}</td>
+      <td>${s.total}</td>
+      <td style="color:var(--green);font-weight:700">${s.registered}</td>
+      <td style="color:var(--amber);font-weight:700">${s.underReg}</td>
+      <td style="color:var(--blue);font-weight:700">${s.other}</td>
+    </tr>`).join('');
+  body.innerHTML = `
+    <div class="hint-box">تقرير شامل لكل الشركات/الملفات المسجلة في النظام — يمكنك تنزيل ملخص PDF، أو ملف Excel كامل لكل البيانات، أو تقرير تفصيلي بكل المنتجات.</div>
+    <div class="report-summary-cards">
+      <div class="stat-card"><div class="num">${stats.length}</div><div class="lbl">عدد الشركات/الملفات</div></div>
+      <div class="stat-card"><div class="num">${grand.total}</div><div class="lbl">إجمالي المنتجات</div></div>
+      <div class="stat-card"><div class="num" style="color:var(--green)">${grand.registered}</div><div class="lbl">مسجّلة بالكامل</div></div>
+      <div class="stat-card"><div class="num" style="color:var(--amber)">${grand.underReg}</div><div class="lbl">تحت التسجيل</div></div>
+    </div>
+    <div class="section-title">ملخص حسب الشركة</div>
+    <table class="data-table">
+      <thead><tr><th>الشركة / الملف</th><th>إجمالي المنتجات</th><th>مسجّلة</th><th>تحت التسجيل</th><th>أخرى</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5">لا توجد بيانات</td></tr>'}</tbody>
+    </table>
+    <div class="section-title">تنزيل التقارير</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn btn-gold" onclick="exportReportSummaryPDF()">⎙ ملخص PDF (كل الشركات)</button>
+      <button class="btn btn-outline" onclick="exportReportDetailedPDF()">⎙ تقرير تفصيلي PDF (كل المنتجات)</button>
+      <button class="btn btn-outline" onclick="exportReportFullExcel()">⇩ ملف Excel كامل (كل البيانات)</button>
+    </div>
+    <div class="section-title">تقرير مفصل عن منتج محدد</div>
+    <div class="hint-box">اختر الشركة ثم المنتج لعرض كل بياناته بالتفصيل مرحلة بمرحلة، ويمكنك تصدير هذا التقرير كملف PDF مستقل بالمنتج.</div>
+    <div class="two-col" style="margin-bottom:14px">
+      <div class="field-row">
+        <label>الشركة / الملف</label>
+        <select id="reportCompanySelect" onchange="onReportCompanyChange()"></select>
+      </div>
+      <div class="field-row">
+        <label>المنتج</label>
+        <select id="reportProductSelect" onchange="renderProductDetailReport()"></select>
+      </div>
+    </div>
+    <div style="margin-bottom:12px">
+      <button class="btn btn-gold" onclick="exportProductDetailPDF()">⎙ تصدير تقرير هذا المنتج PDF</button>
+    </div>
+    <div id="productDetailReportBody"></div>
+  `;
+  initProductDetailReportSelectors();
+}
+function initProductDetailReportSelectors(){
+  const companySel = document.getElementById('reportCompanySelect');
+  if(!companySel) return;
+  const companies = Object.keys(DB);
+  companySel.innerHTML = companies.length
+    ? companies.map(c=> `<option value="${escAttr(c)}">${esc(c)}</option>`).join('')
+    : '<option value="">لا توجد شركات</option>';
+  if(companies.length){
+    companySel.value = (currentCompany && DB[currentCompany]) ? currentCompany : companies[0];
+  }
+  populateReportProductSelect();
+}
+function onReportCompanyChange(){ populateReportProductSelect(); }
+function populateReportProductSelect(){
+  const companySel = document.getElementById('reportCompanySelect');
+  const productSel = document.getElementById('reportProductSelect');
+  if(!companySel || !productSel) return;
+  const company = companySel.value;
+  const d = DB[company];
+  if(!d || !d.rows.length){
+    productSel.innerHTML = '<option value="">لا توجد منتجات</option>';
+    renderProductDetailReport();
+    return;
+  }
+  const nameIdx = findFieldIndex(company, ['product name']);
+  productSel.innerHTML = d.rows.map((r,i)=>{
+    const name = nameIdx>=0 ? (r[nameIdx]||'بدون اسم') : (r[1]||'بدون اسم');
+    return `<option value="${i}">${esc(name)} (#${i+1})</option>`;
+  }).join('');
+  renderProductDetailReport();
+}
+function renderProductDetailReport(){
+  const el = document.getElementById('productDetailReportBody');
+  const companySel = document.getElementById('reportCompanySelect');
+  const productSel = document.getElementById('reportProductSelect');
+  if(!el || !companySel || !productSel) return;
+  const company = companySel.value;
+  const d = DB[company];
+  if(!d || productSel.value === ''){ el.innerHTML = '<div class="empty" style="padding:20px 10px">اختر منتجًا لعرض تفاصيله</div>'; return; }
+  const rowIndex = parseInt(productSel.value, 10);
+  const row = d.rows[rowIndex];
+  if(!row){ el.innerHTML=''; return; }
+  const sections = buildSections(company);
+  el.innerHTML = sections.map(sec=>{
+    const rowsHtml = sec.idxs.map(i=>{
+      const label = d.fields[i] || ('حقل '+i);
+      const val = row[i] || '—';
+      return `<tr><td style="font-weight:600;color:var(--muted);width:38%">${esc(label)}</td><td>${esc(val)}</td></tr>`;
+    }).join('');
+    return `<div class="section-title">${esc(sec.title)}</div><table class="data-table"><tbody>${rowsHtml}</tbody></table>`;
+  }).join('');
+}
+function exportProductDetailPDF(){
+  const companySel = document.getElementById('reportCompanySelect');
+  const productSel = document.getElementById('reportProductSelect');
+  if(!companySel || !productSel || productSel.value===''){ toast('اختر منتجًا أولاً'); return; }
+  const company = companySel.value;
+  const d = DB[company];
+  const rowIndex = parseInt(productSel.value, 10);
+  const row = d.rows[rowIndex];
+  if(!row){ toast('اختر منتجًا أولاً'); return; }
+  const nameIdx = findFieldIndex(company, ['product name']);
+  const productName = nameIdx>=0 ? (row[nameIdx]||'منتج') : (row[1]||'منتج');
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'portrait'});
+  doc.setFontSize(14);
+  doc.text('Detailed Product Report', 14, 14);
+  doc.setFontSize(10);
+  doc.text(`Company: ${company}`, 14, 21);
+  doc.text(`Product: ${productName}`, 14, 27);
+  doc.setFontSize(8);
+  doc.text(new Date().toLocaleString('en-GB'), 14, 32);
+  const sections = buildSections(company);
+  let startY = 38;
+  sections.forEach(sec=>{
+    const body = sec.idxs.map(i=> [d.fields[i] || ('field '+i), row[i] || '']);
+    if(startY > 260){ doc.addPage(); startY = 14; }
+    doc.setFontSize(10);
+    doc.text(sec.title, 14, startY);
+    doc.autoTable({
+      head:[['Field','Value']], body, startY: startY+3,
+      styles:{fontSize:8, cellWidth:'wrap'},
+      columnStyles:{0:{cellWidth:70}, 1:{cellWidth:110}}
+    });
+    startY = doc.lastAutoTable.finalY + 8;
+  });
+  const safeName = String(productName).replace(/[\\/?*\[\]:]/g,'-').slice(0,60);
+  doc.save(`تقرير-منتج-${safeName}-${new Date().toISOString().slice(0,10)}.pdf`);
+  toast('تم تصدير تقرير المنتج PDF');
+}
+function exportReportSummaryPDF(){
+  const stats = allCompanyStats();
+  if(!stats.length){ toast('لا توجد بيانات لتصديرها'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'landscape'});
+  doc.setFontSize(15);
+  doc.text('Registration Status Summary Report — All Companies', 14, 14);
+  doc.setFontSize(9);
+  doc.text(new Date().toLocaleString('en-GB'), 14, 20);
+  const head = [['Company','Total Products','Registered','Under Registration','Other']];
+  const bodyRows = stats.map(s=>[s.company, s.total, s.registered, s.underReg, s.other]);
+  const grand = stats.reduce((acc,s)=>({total:acc.total+s.total, registered:acc.registered+s.registered, underReg:acc.underReg+s.underReg, other:acc.other+s.other}), {total:0,registered:0,underReg:0,other:0});
+  bodyRows.push(['TOTAL', grand.total, grand.registered, grand.underReg, grand.other]);
+  doc.autoTable({head, body: bodyRows, startY:26, styles:{fontSize:10}});
+  doc.save(`ملخص-تقرير-التسجيل-${new Date().toISOString().slice(0,10)}.pdf`);
+  toast('تم تصدير الملخص PDF');
+}
+function exportReportDetailedPDF(){
+  const companies = Object.keys(DB);
+  if(!companies.length){ toast('لا توجد بيانات لتصديرها'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'landscape'});
+  let first = true;
+  companies.forEach(company=>{
+    const d = DB[company];
+    const nameIdx = findFieldIndex(company,['product name']);
+    const apiIdx = findFieldIndex(company,['api']);
+    const statusIdx = findFieldIndex(company,['product status']);
+    const decreeIdx = findFieldIndex(company,['decree']);
+    const gtinIdx = findFieldIndex(company,['gtin']);
+    if(!first) doc.addPage();
+    first = false;
+    doc.setFontSize(14);
+    doc.text(`Product Registration Status — ${company}`, 14, 14);
+    const head = [['#','Product Name','API','GTIN','Decree','Status']];
+    const bodyRows = d.rows.map((r,i)=>[
+      i+1,
+      nameIdx>=0?r[nameIdx]:r[1],
+      apiIdx>=0?r[apiIdx]:r[2],
+      gtinIdx>=0?r[gtinIdx]:'',
+      decreeIdx>=0?r[decreeIdx]:'',
+      statusIdx>=0?r[statusIdx]:''
+    ]);
+    doc.autoTable({head, body: bodyRows, startY:20, styles:{fontSize:9}});
+  });
+  doc.save(`تقرير-تفصيلي-كل-المنتجات-${new Date().toISOString().slice(0,10)}.pdf`);
+  toast('تم تصدير التقرير التفصيلي PDF');
+}
+function exportReportFullExcel(){
+  const companies = Object.keys(DB);
+  if(!companies.length){ toast('لا توجد بيانات لتصديرها'); return; }
+  const wb = XLSX.utils.book_new();
+  const summary = allCompanyStats();
+  const summaryAOA = [['Company','Total Products','Registered','Under Registration','Other'],
+    ...summary.map(s=>[s.company, s.total, s.registered, s.underReg, s.other])];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryAOA), 'Summary');
+  companies.forEach(company=>{
+    const d = DB[company];
+    const aoa = [d.fields, ...d.rows];
+    const sheetName = company.substring(0,31).replace(/[\\/?*\[\]:]/g,'-');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), sheetName || 'Sheet');
+  });
+  XLSX.writeFile(wb, `تقرير-بيانات-كامل-${new Date().toISOString().slice(0,10)}.xlsx`);
+  toast('تم تصدير ملف Excel الكامل');
+}
+
+/* ============ INIT ============ */
+/* App boot sequence:
+   1) paint instantly from whatever is cached locally on this device
+   2) connect to the shared cloud database and wait for the first live snapshot
+      of companies/users/access log/change log
+   3) if this is the very first time the cloud has ever been used, seed it
+      from whatever this device already had locally (or from SEED if nothing)
+   4) show the login/setup screen (cloud listeners keep everything live from
+      here on — any change from any device/user updates every other one) */
+function boot(){
+  loadLocalCacheOnly();
+  const localDBBackup = JSON.parse(JSON.stringify(DB));
+  const localUsersBackup = JSON.parse(JSON.stringify(USERS_CACHE));
+  const localAccessLogBackup = JSON.parse(JSON.stringify(ACCESSLOG_CACHE));
+  const localChangeLogBackup = JSON.parse(JSON.stringify(CHANGELOG_CACHE));
+
+  const cloudState = {companiesEmpty:true, usersEmpty:true, accessLogEmpty:true, changeLogEmpty:true, attachmentsEmpty:true};
+  const seen = {companies:false, users:false, accessLog:false, changeLog:false, attachments:false};
+
+  const callbacks = {
+    onCompanies: (companies)=>{
+      if(!seen.companies){ seen.companies = true; cloudState.companiesEmpty = Object.keys(companies).length === 0; }
+      DB = companies;
+      _knownCompanyNames = new Set(Object.keys(DB));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(DB));
+      if(appStarted){
+        if(!DB[currentCompany]) currentCompany = Object.keys(DB)[0] || null;
+        renderAll();
+      }
+    },
+    onUsers: (list)=>{
+      if(!seen.users){ seen.users = true; cloudState.usersEmpty = !list || list.length===0; }
+      USERS_CACHE = list || [];
+      localStorage.setItem(USERS_KEY, JSON.stringify(USERS_CACHE));
+      const adminOverlay = document.getElementById('adminOverlay');
+      if(appStarted && adminOverlay && adminOverlay.classList.contains('show')) renderAdminPanel();
+    },
+    onAccessLog: (log)=>{
+      if(!seen.accessLog){ seen.accessLog = true; cloudState.accessLogEmpty = !log || log.length===0; }
+      ACCESSLOG_CACHE = log || [];
+      localStorage.setItem(ACCESSLOG_KEY, JSON.stringify(ACCESSLOG_CACHE));
+      const adminOverlay = document.getElementById('adminOverlay');
+      if(appStarted && adminOverlay && adminOverlay.classList.contains('show')) renderAdminPanel();
+    },
+    onChangeLog: (log)=>{
+      if(!seen.changeLog){ seen.changeLog = true; cloudState.changeLogEmpty = !log || log.length===0; }
+      CHANGELOG_CACHE = log || [];
+      localStorage.setItem(CHANGELOG_KEY, JSON.stringify(CHANGELOG_CACHE));
+      const adminOverlay = document.getElementById('adminOverlay');
+      if(appStarted && adminOverlay && adminOverlay.classList.contains('show')) renderAdminPanel();
+    },
+    onAttachments: (list)=>{
+      if(!seen.attachments){ seen.attachments = true; cloudState.attachmentsEmpty = !list || list.length===0; }
+      ATTACHMENTS_STORE = list || [];
+      localStorage.setItem(ATTACHMENTS_KEY, JSON.stringify(ATTACHMENTS_STORE));
+      // live-refresh whichever product dossier is currently open, so an
+      // attachment uploaded on another device/user shows up immediately
+      if(appStarted && currentRowId){
+        getAttachments(currentRowId).then(list2=>{
+          attachmentsCache = list2;
+          refreshAllFieldBadges();
+          document.querySelectorAll('.field-att-panel').forEach(p=>{
+            if(p.style.display !== 'none'){
+              const idx = parseInt(p.id.replace('field-att-',''), 10);
+              if(!isNaN(idx)) renderFieldAttPanel(idx);
+            }
+          });
+        });
+      }
+    }
+  };
+
+  function finishBoot(online){
+    document.getElementById('bootOverlay').style.display = 'none';
+    document.getElementById('loginOverlay').style.display = 'flex';
+    if(online){
+      if(cloudState.companiesEmpty){
+        DB = Object.keys(localDBBackup).length ? localDBBackup : JSON.parse(JSON.stringify(SEED));
+        _knownCompanyNames = new Set(Object.keys(DB));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(DB));
+        Object.keys(DB).forEach(name=> window.cloudSync.saveCompany(name, DB[name]));
+      }
+      if(cloudState.usersEmpty && localUsersBackup.length){
+        USERS_CACHE = localUsersBackup;
+        localStorage.setItem(USERS_KEY, JSON.stringify(USERS_CACHE));
+        window.cloudSync.saveUsers(USERS_CACHE);
+      }
+      if(cloudState.accessLogEmpty && localAccessLogBackup.length){
+        ACCESSLOG_CACHE = localAccessLogBackup;
+        localStorage.setItem(ACCESSLOG_KEY, JSON.stringify(ACCESSLOG_CACHE));
+        window.cloudSync.saveAccessLog(ACCESSLOG_CACHE);
+      }
+      if(cloudState.changeLogEmpty && localChangeLogBackup.length){
+        CHANGELOG_CACHE = localChangeLogBackup;
+        localStorage.setItem(CHANGELOG_KEY, JSON.stringify(CHANGELOG_CACHE));
+        window.cloudSync.saveChangeLog(CHANGELOG_CACHE);
+      }
+      if(cloudState.attachmentsEmpty){
+        // one-time: pick up any PDFs that were uploaded on this device before
+        // the cloud connection ever worked, so they aren't left behind
+        migrateLegacyAttachmentsToCloud();
+      }
+    } else {
+      if(Object.keys(DB).length === 0){ DB = JSON.parse(JSON.stringify(SEED)); }
+      toast('تعذر الاتصال بالخادم السحابي — البرنامج يعمل بآخر نسخة محفوظة محليًا على هذا الجهاز، وسيُزامن تلقائيًا عند عودة الاتصال');
+    }
+    initAuth();
+  }
+
+  if(window.cloudSync){
+    window.cloudSync.init(callbacks).then(finishBoot);
+  } else {
+    finishBoot(false);
+  }
+}
+let _bootStarted = false;
+function startBoot(){
+  if(_bootStarted) return;
+  _bootStarted = true;
+  boot();
+}
+if(window.cloudSync){
+  startBoot();
+} else {
+  // the Supabase module script (type="module") always executes after this
+  // classic inline script, so wait for its ready signal — with a fallback
+  // timeout in case the CDN is blocked/offline, so the app still opens.
+  window.addEventListener('cloudSyncScriptLoaded', startBoot, {once:true});
+  setTimeout(startBoot, 3000);
+}
+</script>
+</body>
+</html>
