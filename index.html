@@ -1070,6 +1070,28 @@ function migrateChangeGroupByMatch(matchFn, newGroup){
   });
   saveDB();
 }
+/* Fixes the 5 B.E-study columns (Type of Study, Start date of study, End date
+   of study, Place of Study, Received Date from S.C) that were left under the
+   "Stability Status" section header on some sheets. These 5 columns don't
+   always sit at the same fixed index across companies (each sheet has a
+   different number of columns before them), so instead of a hardcoded index
+   range we anchor on the "Type of  Study" sub-label — it only ever appears
+   once per sheet, right where this block starts — and fix that column plus
+   the 4 that follow it, wherever they land. */
+function migrateFixBEStudyGroupBySub(){
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields || !d.subs) return;
+    const anchor = d.subs.findIndex(s=> (s||'').trim().toLowerCase() === 'type of  study');
+    if(anchor === -1) return;
+    for(let i=anchor; i<anchor+5 && i<d.groups.length; i++){
+      if((d.groups[i]||'').trim().toLowerCase() === 'stability status'){
+        d.groups[i] = 'B.E';
+      }
+    }
+  });
+  saveDB();
+}
 function migrateDedupeFieldKeepFirst(label){
   const wanted = label.trim().toLowerCase();
   const tasks = [];
@@ -1209,12 +1231,12 @@ function runMigrations(){
         && ['submission date','application no.'].includes((f||'').trim().toLowerCase()),
       'Pricing'
     ))
-    // Stability Status → B.E: fields 53-57 (the B.E-study columns that trailed off under
-    // the wrong section header) belong with the rest of the B.E group
-    .then(()=> migrateChangeGroupByMatch(
-      (f,g,s,i)=> [53,54,55,56,57].includes(i) && (g||'').trim().toLowerCase()==='stability status',
-      'B.E'
-    ))
+    // Stability Status → B.E: the B.E-study columns that trailed off under
+    // the wrong section header belong with the rest of the B.E group.
+    // (Anchored on the "Type of Study" sub-label rather than a fixed column
+    // index — see migrateFixBEStudyGroupBySub — because that index isn't the
+    // same on every sheet.)
+    .then(()=> migrateFixBEStudyGroupBySub())
     // add the new "Biotech Pharma NFSA" company/table
     .then(()=> migrateAddCompanyIfMissing('Biotech Pharma NFSA', {
       groups: ['عام','عام','عام','عام','عام','عام','عام','عام','عام','عام'],
