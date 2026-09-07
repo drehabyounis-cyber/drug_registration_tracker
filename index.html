@@ -1360,8 +1360,11 @@ function showLiveChangeNotif(entry){
 }
 /* Opens the product a changeLog entry refers to (switching company first if
    needed) and highlights the specific field(s) it recorded as changed.
-   Matches by current product name since changeLog entries don't store a row
-   id — best-effort if the product was renamed/deleted since. */
+   Prefers the entry's stable rowId (same id used for attachments) since
+   some companies have several products sharing one name — e.g. one name
+   reused across different dosage strengths — which makes name-matching
+   ambiguous. Falls back to a name search for older entries logged before
+   rowId was recorded. */
 function jumpToChangeLogEntry(entry){
   if(!entry) return;
   const company = entry.company;
@@ -1375,8 +1378,11 @@ function jumpToChangeLogEntry(entry){
     return; // company/import/restore-level entries: just land on the company view
   }
   const d = DB[company];
-  const nameIdx = findFieldIndex(company, ['product name']);
-  const rowIndex = nameIdx>=0 ? d.rows.findIndex(r=> (r[nameIdx]||'')===entry.product) : -1;
+  let rowIndex = (entry.rowId && d.ids) ? d.ids.indexOf(entry.rowId) : -1;
+  if(rowIndex<0){
+    const nameIdx = findFieldIndex(company, ['product name']);
+    rowIndex = nameIdx>=0 ? d.rows.findIndex(r=> (r[nameIdx]||'')===entry.product) : -1;
+  }
   if(rowIndex<0){
     toast('تعذر العثور على المنتج — ربما تم حذفه أو تغيير اسمه بعد هذا التعديل');
     return;
@@ -1905,7 +1911,7 @@ function handleFieldAttachmentUpload(e, idx){
       const productName = (rowArr && nameIdx>=0 && rowArr[nameIdx]) ? rowArr[nameIdx] : '(بدون اسم)';
       pushChangeLog({
         username: currentUser.username, role: currentUser.role,
-        company: currentCompany, product: productName,
+        company: currentCompany, product: productName, rowId: currentRowId,
         action: 'رفع مرفق',
         changes: validFiles.map(f=> ({field: fieldLabel, idx, from:'', to: f.name}))
       });
@@ -1965,7 +1971,7 @@ function removeAttachment(attId, idx){
       const productName = (rowArr && nameIdx>=0 && rowArr[nameIdx]) ? rowArr[nameIdx] : '(بدون اسم)';
       pushChangeLog({
         username: currentUser.username, role: currentUser.role,
-        company: currentCompany, product: productName,
+        company: currentCompany, product: productName, rowId: currentRowId,
         action: 'حذف مرفق',
         changes: [{field: existing.fieldLabel || '', idx, from: existing.name, to: ''}]
       });
@@ -2013,7 +2019,7 @@ function saveProduct(){
     const productName = (nameIdx>=0 && newRow[nameIdx]) ? newRow[nameIdx] : '(بدون اسم)';
     pushChangeLog({
       username: currentUser.username, role: currentUser.role,
-      company: currentCompany, product: productName,
+      company: currentCompany, product: productName, rowId,
       action: wasNew ? 'إضافة منتج جديد' : 'تعديل بيانات منتج',
       changes
     });
