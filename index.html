@@ -776,7 +776,7 @@ function diffRowChanges(fields, oldRow, newRow){
     const from = (oldRow[i]||'').toString();
     const to = (newRow[i]||'').toString();
     if(from !== to){
-      changes.push({field: label || ('حقل '+i), from, to});
+      changes.push({field: label || ('حقل '+i), idx: i, from, to});
     }
   });
   return changes;
@@ -1382,16 +1382,29 @@ function jumpToChangeLogEntry(entry){
     return;
   }
   openProduct(rowIndex);
-  const changedLabels = (entry.changes||[]).map(c=> c.field).filter(Boolean);
-  if(changedLabels.length) setTimeout(()=> highlightChangedFields(changedLabels), 90);
+  const changedEntries = (entry.changes||[]).filter(c=> c && c.field);
+  if(changedEntries.length) setTimeout(()=> highlightChangedFields(changedEntries), 90);
 }
-function highlightChangedFields(labels){
+/* Highlights the exact field(s) a changeLog entry recorded as changed.
+   Many companies reuse the same column label across several sections
+   (e.g. "Issue Date" / "Submission Date" / "Reply to EDA" each appear
+   half a dozen times — once per registration stage), so matching by
+   label text alone can light up — and scroll to — the wrong occurrence.
+   Each change now also carries the exact column index it happened at,
+   which resolves that ambiguity; entries logged before this existed
+   fall back to a best-effort label-text search. */
+function highlightChangedFields(changes){
   const d = currentCompany && DB[currentCompany];
   if(!d) return;
   let firstRow = null;
-  d.fields.forEach((f,i)=>{
-    const label = f || ('حقل '+i);
-    if(!labels.includes(label)) return;
+  changes.forEach(ch=>{
+    let i = -1;
+    if(typeof ch.idx==='number' && (d.fields[ch.idx] || ('حقل '+ch.idx))===ch.field){
+      i = ch.idx;
+    } else {
+      i = d.fields.findIndex((f,idx)=> (f || ('حقل '+idx))===ch.field);
+    }
+    if(i<0) return;
     const input = document.querySelector(`#modalBody [data-idx="${i}"]`);
     const row = input && input.closest('.field-row');
     if(!row) return;
@@ -1894,7 +1907,7 @@ function handleFieldAttachmentUpload(e, idx){
         username: currentUser.username, role: currentUser.role,
         company: currentCompany, product: productName,
         action: 'رفع مرفق',
-        changes: validFiles.map(f=> ({field: fieldLabel, from:'', to: f.name}))
+        changes: validFiles.map(f=> ({field: fieldLabel, idx, from:'', to: f.name}))
       });
     }
   }).catch(err=>{
@@ -1954,7 +1967,7 @@ function removeAttachment(attId, idx){
         username: currentUser.username, role: currentUser.role,
         company: currentCompany, product: productName,
         action: 'حذف مرفق',
-        changes: [{field: existing.fieldLabel || '', from: existing.name, to: ''}]
+        changes: [{field: existing.fieldLabel || '', idx, from: existing.name, to: ''}]
       });
     }
   });
