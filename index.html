@@ -128,36 +128,49 @@ window.cloudSync = {
       const finishOnce = (ok)=>{ if(!resolved){ resolved = true; resolve(ok); } };
       setTimeout(()=> finishOnce(false), 8000);
 
+      // Pulls the full current state and replays it through the same
+      // callbacks used at boot. Used both for the first load and — this is
+      // the part that fixes missed live notifications — whenever the tab
+      // reconnects or regains focus after being offline/backgrounded, since
+      // a dropped realtime socket does not redeliver the postgres_changes
+      // events it missed while disconnected. Re-running this puts the freshly
+      // fetched changeLog through onChangeLog exactly like a live event would,
+      // so onChangeLog's own "did the top entry change?" check still decides
+      // whether to pop the notification — nothing else has to change there.
+      const pullState = async ()=>{
+        const [companiesRes, metaRes, attachmentsRes] = await Promise.all([
+          sb.from('companies').select('name,data'),
+          sb.from('app_meta').select('key,data'),
+          sb.from('attachments').select('att_id,row_id,field_idx,field_label,name,url,path,size_kb,date,uploaded_by')
+        ]);
+        if(companiesRes.error) throw companiesRes.error;
+        if(metaRes.error) throw metaRes.error;
+        if(attachmentsRes.error) throw attachmentsRes.error;
+
+        _companies = {};
+        (companiesRes.data||[]).forEach(r=> _companies[r.name] = r.data);
+        callbacks.onCompanies({..._companies});
+
+        _meta = { users: [], accessLog: [], changeLog: [] };
+        (metaRes.data||[]).forEach(r=>{
+          if(r.key==='users') _meta.users = r.data.list || [];
+          if(r.key==='accessLog') _meta.accessLog = r.data.log || [];
+          if(r.key==='changeLog') _meta.changeLog = r.data.log || [];
+        });
+        callbacks.onUsers(_meta.users);
+        callbacks.onAccessLog(_meta.accessLog);
+        callbacks.onChangeLog(_meta.changeLog);
+
+        _attachments = (attachmentsRes.data||[]).map(r=>({
+          attId:r.att_id, rowId:r.row_id, fieldIdx:r.field_idx, fieldLabel:r.field_label,
+          name:r.name, url:r.url, path:r.path, sizeKB:r.size_kb, date:r.date, uploadedBy:r.uploaded_by
+        }));
+        callbacks.onAttachments(_attachments.slice());
+      };
+
       (async ()=>{
         try{
-          const [companiesRes, metaRes, attachmentsRes] = await Promise.all([
-            sb.from('companies').select('name,data'),
-            sb.from('app_meta').select('key,data'),
-            sb.from('attachments').select('att_id,row_id,field_idx,field_label,name,url,path,size_kb,date,uploaded_by')
-          ]);
-          if(companiesRes.error) throw companiesRes.error;
-          if(metaRes.error) throw metaRes.error;
-          if(attachmentsRes.error) throw attachmentsRes.error;
-
-          _companies = {};
-          (companiesRes.data||[]).forEach(r=> _companies[r.name] = r.data);
-          callbacks.onCompanies({..._companies});
-
-          _meta = { users: [], accessLog: [], changeLog: [] };
-          (metaRes.data||[]).forEach(r=>{
-            if(r.key==='users') _meta.users = r.data.list || [];
-            if(r.key==='accessLog') _meta.accessLog = r.data.log || [];
-            if(r.key==='changeLog') _meta.changeLog = r.data.log || [];
-          });
-          callbacks.onUsers(_meta.users);
-          callbacks.onAccessLog(_meta.accessLog);
-          callbacks.onChangeLog(_meta.changeLog);
-
-          _attachments = (attachmentsRes.data||[]).map(r=>({
-            attId:r.att_id, rowId:r.row_id, fieldIdx:r.field_idx, fieldLabel:r.field_label,
-            name:r.name, url:r.url, path:r.path, sizeKB:r.size_kb, date:r.date, uploadedBy:r.uploaded_by
-          }));
-          callbacks.onAttachments(_attachments.slice());
+          await pullState();
 
           sb.channel('companies-changes')
             .on('postgres_changes', { event:'*', schema:'public', table:'companies' }, (payload)=>{
@@ -194,6 +207,17 @@ window.cloudSync = {
               callbacks.onAttachments(_attachments.slice());
             })
             .subscribe();
+
+          let refreshing = false;
+          const refreshFromCloud = ()=>{
+            if(refreshing) return;
+            refreshing = true;
+            pullState().catch(e=> console.warn('cloud refresh failed', e)).finally(()=> refreshing=false);
+          };
+          window.addEventListener('online', refreshFromCloud);
+          document.addEventListener('visibilitychange', ()=>{
+            if(document.visibilityState === 'visible') refreshFromCloud();
+          });
 
           finishOnce(true);
         }catch(e){
