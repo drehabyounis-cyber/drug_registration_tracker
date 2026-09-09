@@ -1439,7 +1439,7 @@ function statusBadgeClass(status){
   const s = (status||'').toLowerCase();
   if(s.includes('register') && !s.includes('under')) return 'b-green';
   if(s.includes('under') || s.includes('line extension')) return 'b-amber';
-  if(s.includes('block') || s.includes('reject')) return 'b-red';
+  if(s.includes('block') || s.includes('reject') || s.includes('cancel')) return 'b-red';
   return 'b-blue';
 }
 
@@ -1817,6 +1817,7 @@ function renderModalBody(){
       <option value="Under registration"></option>
       <option value="Line extension"></option>
       <option value="Blocked"></option>
+      <option value="Canceled"></option>
     </datalist>`;
 
   body.innerHTML = note + fieldsBlock + statusOptions;
