@@ -1330,6 +1330,48 @@ function migrateDedupeFieldKeepFirst(label){
   });
   return Promise.all(tasks).then(()=> saveDB());
 }
+/* Appends new fields right after the LAST field currently under a matched
+   section (per company) — used to add columns to the end of an existing
+   section like "Quality" regardless of how many fields that section already
+   has on each sheet. Skips a company that has no matching section at all.
+   Idempotent: skips any individual field that's already present anywhere
+   in that company's sheet. */
+function migrateAppendFieldsAtGroupEnd(groupMatchFn, newFields){
+  const tasks = [];
+  Object.keys(DB).forEach(company=>{
+    const d = DB[company];
+    if(!d.fields) return;
+    let refIdx = -1;
+    for(let i=0;i<d.fields.length;i++){
+      if(groupMatchFn(d.groups[i], d.subs[i], i)) refIdx = i;
+    }
+    if(refIdx === -1) return;
+    let insertAt = refIdx + 1;
+    const shiftFrom = insertAt;
+    let shiftCount = 0;
+    newFields.forEach(nf=>{
+      const already = d.fields.some(f=> (f||'').trim().toLowerCase() === nf.label.toLowerCase());
+      if(already) return;
+      d.fields.splice(insertAt, 0, nf.label);
+      d.groups.splice(insertAt, 0, nf.group !== undefined ? nf.group : d.groups[refIdx]);
+      d.subs.splice(insertAt, 0, nf.sub !== undefined ? nf.sub : d.subs[refIdx]);
+      d.rows.forEach(row=> row.splice(insertAt, 0, ''));
+      insertAt++;
+      shiftCount++;
+    });
+    if(shiftCount === 0) return;
+    const ids = d.ids || [];
+    ids.forEach(rowId=>{
+      tasks.push(
+        getAttachments(rowId).then(list=>{
+          const toShift = list.filter(a=> a.fieldIdx >= shiftFrom);
+          return Promise.all(toShift.map(a=> shiftAttachmentFieldIdx(a.attId, a.fieldIdx + shiftCount)));
+        })
+      );
+    });
+  });
+  return Promise.all(tasks).then(()=> saveDB());
+}
 function migrateAppendFieldIfMissing(label, group, sub){
   Object.keys(DB).forEach(company=>{
     const d = DB[company];
@@ -1451,7 +1493,15 @@ function runMigrations(){
         ['10','Fortibone','6223015030730','Collagen +Ca + vit D3','','','Registered','2023/5155','14/01/2028','Done'],
         ['11','Fortibone Junior','','Collagen +Ca + vit D3','','','Registered','2023/5569','26/02/2028','Done']
       ]
-    }));
+    }))
+    // Superseded: "EDA Guideline" and "Fees (Fast track or Normal Track)" were
+    // briefly added as plain columns at the end of the Quality section — they
+    // now live instead as a dedicated "EDA Guideline" tab inside the
+    // "ملفات Human Drug - Quality" module (link + fees + attachments, per
+    // product). Remove the columns in case they were already synced.
+    .then(()=> migrateRemoveFieldsByLabel([
+      'EDA Guideline','Fees (Fast track or Normal Track)'
+    ]));
 }
 function toast(msg){
   const t = document.getElementById('toast');
@@ -3008,7 +3058,7 @@ const API_LISTING_ITEMS = [
   { code:'8', title:'خطاب إقرار الامتيازات Privilege(s) Declaration Letter (Template #3) — لصاحب رخصة التسجيل فقط' }
 ];
 
-let ctdActiveTab = 'ectd';  // 'ectd' | 'apilist'
+let ctdActiveTab = 'ectd';  // 'ectd' | 'apilist' | 'guideline'
 let ctdView = 'list';      // 'list' | 'detail'
 let ctdCompany = null;     // company currently shown in the module
 let ctdRowIndex = null;    // row index of the product shown in detail view
@@ -3126,8 +3176,79 @@ function deleteApiListingFile(company, rowId, code, fileId){
 function apiListingFindFile(code, fileId){
   return getApiListingItemData(ctdCompany, ctdRowId, code).files.find(f=> f.id===fileId);
 }
+/* ---- EDA Guideline: a single per-product record (not a checklist) holding
+   a reference link, the applicable fees/track, and any related documents —
+   keyed under DB[company].guideline instead of DB[company].ctd / apiListing ---- */
+function getGuidelineRowData(company, rowId){
+  const d = DB[company];
+  if(!d || !rowId) return { link:'', fees:'', files:[] };
+  if(!d.guideline) d.guideline = {};
+  if(!d.guideline[rowId]) d.guideline[rowId] = { link:'', fees:'', files:[] };
+  const rec = d.guideline[rowId];
+  if(!rec.files) rec.files = [];
+  if(rec.link === undefined) rec.link = '';
+  if(rec.fees === undefined) rec.fees = '';
+  return rec;
+}
+function guidelineProgress(company, rowId){
+  const rec = getGuidelineRowData(company, rowId);
+  let done = 0;
+  if((rec.link||'').trim()) done++;
+  if((rec.fees||'').trim()) done++;
+  return { done, total: 2 };
+}
+function guidelineUpdateField(field, value){
+  const rec = getGuidelineRowData(ctdCompany, ctdRowId);
+  const oldVal = rec[field] || '';
+  if(oldVal === value) return;
+  rec[field] = value;
+  saveDB();
+  if(currentUser){
+    const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+    const row = DB[ctdCompany].rows[ctdRowIndex];
+    const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+    const fieldLabel = field==='link' ? 'EDA Guideline (link)' : 'Fees (Fast track or Normal Track)';
+    pushChangeLog({
+      username: currentUser.username, role: currentUser.role,
+      company: ctdCompany, product: productName, rowId: ctdRowId,
+      action: 'تعديل EDA Guideline',
+      changes: [{field: fieldLabel, idx: field, from: oldVal, to: value}]
+    });
+  }
+}
+function uploadGuidelineFile(company, rowId, file){
+  const attId = genAttId();
+  const path = `guideline/${rowId}/${attId}_${sanitizeForPath(file.name)}`;
+  if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){
+    return Promise.reject(new Error('offline'));
+  }
+  return window.cloudSync.uploadAttachmentFile(path, file).then(()=>{
+    const url = window.cloudSync.getAttachmentPublicUrl(path);
+    const rec = {
+      id: attId, name: file.name, url, path, sizeKB: Math.round(file.size/1024),
+      date: new Date().toISOString().slice(0,10),
+      uploadedBy: currentUser ? currentUser.username : ''
+    };
+    getGuidelineRowData(company, rowId).files.push(rec);
+    saveDB();
+    return rec;
+  });
+}
+function deleteGuidelineFile(company, rowId, fileId){
+  const rec = getGuidelineRowData(company, rowId);
+  const existing = rec.files.find(f=> f.id===fileId);
+  rec.files = rec.files.filter(f=> f.id!==fileId);
+  saveDB();
+  if(existing && existing.path && window.cloudSync) window.cloudSync.deleteAttachmentFile(existing.path);
+  return existing;
+}
+function guidelineFindFile(fileId){
+  return getGuidelineRowData(ctdCompany, ctdRowId).files.find(f=> f.id===fileId);
+}
 function ctdActiveProgress(company, rowId){
-  return ctdActiveTab==='ectd' ? ctdProductProgress(company, rowId) : apiListingProgress(company, rowId);
+  if(ctdActiveTab==='ectd') return ctdProductProgress(company, rowId);
+  if(ctdActiveTab==='apilist') return apiListingProgress(company, rowId);
+  return guidelineProgress(company, rowId);
 }
 
 /* ---- opening / navigating the module ---- */
@@ -3178,6 +3299,7 @@ function renderCtdOverlayContent(){
     <div class="ctd-tabs">
       <button class="ctd-tab-btn ${ctdActiveTab==='ectd'?'active':''}" onclick="ctdSwitchTab('ectd')">eCTD</button>
       <button class="ctd-tab-btn ${ctdActiveTab==='apilist'?'active':''}" onclick="ctdSwitchTab('apilist')">API Listing</button>
+      <button class="ctd-tab-btn ${ctdActiveTab==='guideline'?'active':''}" onclick="ctdSwitchTab('guideline')">EDA Guideline</button>
     </div>`;
   let contentHtml;
   if(ctdView === 'list'){
@@ -3187,7 +3309,9 @@ function renderCtdOverlayContent(){
     const nameIdx = findFieldIndex(ctdCompany, ['product name']);
     const row = d ? d.rows[ctdRowIndex] : null;
     const productName = (nameIdx>=0 && row) ? row[nameIdx] : ('منتج #' + (ctdRowIndex+1));
-    contentHtml = ctdActiveTab==='ectd' ? renderCtdDetailHtml(productName) : renderApiListingDetailHtml(productName);
+    contentHtml = ctdActiveTab==='ectd' ? renderCtdDetailHtml(productName)
+      : ctdActiveTab==='apilist' ? renderApiListingDetailHtml(productName)
+      : renderGuidelineDetailHtml(productName);
   }
   body.innerHTML = tabsHtml + contentHtml;
   body.scrollTop = prevScroll;
@@ -3209,7 +3333,9 @@ function renderCtdListHtml(){
     </div>`;
   const hint = ctdActiveTab==='ectd'
     ? `<div class="hint-box">ابنِ ملف الـ eCTD كامل (بترقيم الوحدات والأقسام الرسمي) لكل منتج على حدة — ارفع المستندات في كل قسم، وتابع نسبة الاكتمال، وصدّر الملف بالكامل كملف ZIP جاهز للتسليم.</div>`
-    : `<div class="hint-box">جهّز مستندات طلب الـ API Listing / Using Listed API لكل منتج طبقًا لدليل الهيئة (قرار رئيس الهيئة 213/2023) — مش كل المستندات الـ8 لازم تنطبق على كل الحالات، ارفع اللي يخص حالتك بس.</div>`;
+    : ctdActiveTab==='apilist'
+      ? `<div class="hint-box">جهّز مستندات طلب الـ API Listing / Using Listed API لكل منتج طبقًا لدليل الهيئة (قرار رئيس الهيئة 213/2023) — مش كل المستندات الـ8 لازم تنطبق على كل الحالات، ارفع اللي يخص حالتك بس.</div>`
+      : `<div class="hint-box">سجّل هنا لينك الـ EDA Guideline الخاص بهذا المنتج، وارفع نسخة منه أو أي مستند متعلق به، وحدّد نوع الرسوم (Fast track أو Normal Track).</div>`;
   if(!d.rows.length){
     return `${hint}${companySelect}<div class="empty"><div class="icon">📦</div>لا توجد منتجات في هذه الشركة بعد</div>`;
   }
@@ -3219,7 +3345,7 @@ function renderCtdListHtml(){
     const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
     const pname = nameIdx>=0 ? (r[nameIdx]||'—') : '—';
     const papi = apiIdx>=0 ? (r[apiIdx]||'') : '';
-    const unit = ctdActiveTab==='ectd' ? 'قسم' : 'مستند';
+    const unit = ctdActiveTab==='ectd' ? 'قسم' : (ctdActiveTab==='apilist' ? 'مستند' : 'بيان');
     return `<div class="pcard" onclick="ctdOpenProductDetail(${i})">
         <div class="pname">${esc(pname)}</div>
         <div class="papi">${esc(papi)}</div>
@@ -3293,6 +3419,50 @@ function renderApiListingDetailHtml(productName){
       </div>
     </div>
     <div class="ctd-tree">${itemsHtml}</div>
+  `;
+}
+function renderGuidelineDetailHtml(productName){
+  const rec = getGuidelineRowData(ctdCompany, ctdRowId);
+  const prog = guidelineProgress(ctdCompany, ctdRowId);
+  const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
+  const fileListHtml = rec.files.length ? rec.files.map(f=>`
+      <div class="att-item">
+        <span class="att-name">📄 ${esc(f.name)}</span>
+        <span class="att-meta">${f.sizeKB} ك.ب · ${f.date}</span>
+        <span class="att-actions">
+          <button class="btn btn-outline" onclick="guidelineViewFile('${escAttr(f.id)}')">عرض</button>
+          <button class="btn btn-outline" onclick="guidelineDownloadFile('${escAttr(f.id)}')">تنزيل</button>
+          <button class="btn btn-red" onclick="guidelineRemoveFile('${escAttr(f.id)}')">حذف</button>
+        </span>
+      </div>`).join('') : `<div class="att-empty">لا توجد مرفقات بعد</div>`;
+  return `
+    <div class="section-title">📦 ${esc(productName)}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <div style="flex:1;min-width:220px">
+        <div class="ctd-progress-bar"><div class="ctd-progress-fill" style="width:${pct}%"></div></div>
+        <div class="meta" style="margin-top:6px"><span>${prog.done} / ${prog.total} بيان مكتمل</span><span>${pct}%</span></div>
+      </div>
+      <button class="btn btn-outline" onclick="ctdBack()">⬅ قائمة المنتجات</button>
+    </div>
+    <div class="ctd-node">
+      <div class="ctd-node-body" style="padding-top:14px">
+        <div class="field-row">
+          <label>لينك الـ EDA Guideline</label>
+          <input type="url" placeholder="https://..." value="${escAttr(rec.link)}" onchange="guidelineUpdateField('link', this.value)">
+        </div>
+        <div class="field-row">
+          <label>Fees (Fast track or Normal Track)</label>
+          <input type="text" placeholder="مثال: Fast track أو Normal Track" value="${escAttr(rec.fees)}" onchange="guidelineUpdateField('fees', this.value)">
+        </div>
+        <div>
+          ${fileListHtml}
+          <label class="btn btn-outline att-upload-btn">
+            ＋ إرفاق مستند الـ Guideline
+            <input type="file" multiple style="display:none" onchange="guidelineHandleUpload(event)">
+          </label>
+        </div>
+      </div>
+    </div>
   `;
 }
 function renderCtdNode(node, depth){
@@ -3441,6 +3611,63 @@ function apiListingRemoveFile(code, fileId){
       company: ctdCompany, product: productName, rowId: ctdRowId,
       action: 'حذف مستند API Listing',
       changes: [{field: 'API Listing ' + code, idx: code, from: existing.name, to: ''}]
+    });
+  }
+}
+/* ---- EDA Guideline file actions ---- */
+function guidelineHandleUpload(e){
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  toast(files.length>1 ? `جارٍ رفع ${files.length} ملفات...` : 'جارٍ رفع الملف...');
+  Promise.all(files.map(f=> uploadGuidelineFile(ctdCompany, ctdRowId, f)))
+    .then(()=>{
+      renderCtdOverlayContent();
+      toast('تم إرفاق المستند بنجاح ✓');
+      if(currentUser){
+        const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+        const row = DB[ctdCompany].rows[ctdRowIndex];
+        const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+        pushChangeLog({
+          username: currentUser.username, role: currentUser.role,
+          company: ctdCompany, product: productName, rowId: ctdRowId,
+          action: 'رفع مستند EDA Guideline',
+          changes: files.map(f=> ({field: 'EDA Guideline', idx: 'guideline', from:'', to: f.name}))
+        });
+      }
+    })
+    .catch(err=>{
+      console.warn('guideline upload failed', err);
+      toast('تعذر رفع المستند — تأكد من الاتصال بالإنترنت وحاول تاني');
+    });
+  e.target.value = '';
+}
+function guidelineViewFile(fileId){
+  const f = guidelineFindFile(fileId);
+  if(!f || !f.url){ toast('تعذر فتح المستند'); return; }
+  window.open(f.url, '_blank');
+}
+function guidelineDownloadFile(fileId){
+  const f = guidelineFindFile(fileId);
+  if(!f || !f.url){ toast('تعذر تنزيل المستند'); return; }
+  const url = f.url + (f.url.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(f.name);
+  const link = document.createElement('a');
+  link.href = url; link.download = f.name; link.target = '_blank';
+  document.body.appendChild(link); link.click(); link.remove();
+}
+function guidelineRemoveFile(fileId){
+  if(!confirm('هل تريد حذف هذا المستند؟')) return;
+  const existing = deleteGuidelineFile(ctdCompany, ctdRowId, fileId);
+  renderCtdOverlayContent();
+  toast('تم حذف المستند');
+  if(currentUser && existing){
+    const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+    const row = DB[ctdCompany].rows[ctdRowIndex];
+    const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+    pushChangeLog({
+      username: currentUser.username, role: currentUser.role,
+      company: ctdCompany, product: productName, rowId: ctdRowId,
+      action: 'حذف مستند EDA Guideline',
+      changes: [{field: 'EDA Guideline', idx: 'guideline', from: existing.name, to: ''}]
     });
   }
 }
