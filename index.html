@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/JsBarcode/3.11.5/JsBarcode.all.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script type="module">
 /* ============ SUPABASE CLOUD SYNC (real-time, cross-device) ============
    Any add/edit/delete by any user on any device is written to this shared
@@ -421,6 +422,26 @@ input[type=file]{display:none}
 .pcard.expiring{box-shadow:0 0 0 2px var(--amber)}
 .pcard.expired-license{box-shadow:0 0 0 2px var(--red)}
 .pcard .exp-flag{position:absolute;top:10px;left:10px;font-size:15px}
+
+/* ---- CTD dossier builder ---- */
+.ctd-progress-bar{background:var(--bg);border:1px solid var(--line);border-radius:20px;height:10px;overflow:hidden}
+.ctd-progress-fill{background:linear-gradient(90deg,var(--gold),var(--gold2));height:100%;border-radius:20px;transition:width .2s}
+.ctd-tree{display:flex;flex-direction:column;gap:6px}
+.ctd-node{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:0}
+.ctd-node-head,.ctd-node-head-static{list-style:none;cursor:pointer;padding:10px 12px;display:flex;align-items:center;gap:10px;font-size:13px}
+.ctd-node-head-static{cursor:default}
+.ctd-node-head::-webkit-details-marker{display:none}
+.ctd-node-head::before{content:'▸';color:var(--muted);font-size:11px;transition:transform .15s}
+details[open]>.ctd-node-head::before{transform:rotate(90deg)}
+.ctd-tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--line)}
+.ctd-tab-btn{background:none;border:none;padding:9px 18px;font-size:13.5px;font-weight:700;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.ctd-tab-btn.active{color:var(--navy);border-bottom-color:var(--gold)}
+.ctd-tab-btn:hover{color:var(--navy)}
+.ctd-node-code{font-weight:800;color:var(--navy);background:var(--bg);border-radius:6px;padding:2px 8px;font-size:11.5px;flex-shrink:0}
+.ctd-node-title{flex:1;color:var(--text)}
+.ctd-file-badge{background:var(--blue-bg);color:var(--blue);border-radius:20px;padding:2px 9px;font-size:11px;font-weight:700;flex-shrink:0}
+.ctd-node-body{padding:4px 12px 12px 12px;display:flex;flex-direction:column;gap:8px}
+.ctd-node .ctd-node{margin-top:2px}
 </style>
 </head>
 <body>
@@ -479,6 +500,7 @@ input[type=file]{display:none}
       <button onclick="exportBackup()">⇩ نسخة احتياطية JSON</button>
       <button onclick="document.getElementById('restoreFile').click()">⇪ استعادة نسخة احتياطية</button>
       <button onclick="openReports()">📊 التقارير</button>
+      <button onclick="openCtdModule()">📁 ملفات Human Drug - Quality</button>
       <button onclick="openLinks()">🔗 روابط أقسام الهيئة</button>
       <button id="adminPanelBtn" style="display:none" onclick="openAdminPanel()">🛡 لوحة الإدارة</button>
       <input type="file" id="importFile" accept=".xlsx,.xls" onchange="handleImportExcel(event)">
@@ -572,7 +594,10 @@ input[type=file]{display:none}
     </div>
     <div class="modal-body" id="modalBody"></div>
     <div class="modal-foot">
-      <button class="btn btn-red" onclick="deleteProduct()" id="delProductBtn">🗑 حذف المنتج</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-red" onclick="deleteProduct()" id="delProductBtn">🗑 حذف المنتج</button>
+        <button class="btn btn-outline" onclick="openCtdForCurrentProduct()" id="ctdBuilderBtn">📁 ملف الـ CTD</button>
+      </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-outline" onclick="closeModal()">إلغاء</button>
         <button class="btn btn-gold" onclick="saveProduct()">💾 حفظ</button>
@@ -611,6 +636,16 @@ input[type=file]{display:none}
       <button class="x" onclick="closeLinks()">✕</button>
     </div>
     <div class="modal-body" id="linksBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="ctdOverlay">
+  <div class="modal" style="max-width:1100px">
+    <div class="modal-head">
+      <h3 id="ctdTitle">📁 ملفات Human Drug - Quality</h3>
+      <button class="x" onclick="closeCtd()">✕</button>
+    </div>
+    <div class="modal-body" id="ctdBody"></div>
   </div>
 </div>
 
@@ -1835,6 +1870,7 @@ function openProduct(index){
   currentRowId = ensureRowId(currentCompany, index);
   document.getElementById('modalTitle').textContent = 'تعديل بيانات المنتج';
   document.getElementById('delProductBtn').style.display='inline-flex';
+  document.getElementById('ctdBuilderBtn').style.display='inline-flex';
   renderModalBody();
   document.getElementById('modalOverlay').classList.add('show');
 }
@@ -1844,6 +1880,7 @@ function openNewProduct(){
   currentRowId = null;
   document.getElementById('modalTitle').textContent = 'إضافة منتج جديد';
   document.getElementById('delProductBtn').style.display='none';
+  document.getElementById('ctdBuilderBtn').style.display='none';
   renderModalBody();
   document.getElementById('modalOverlay').classList.add('show');
 }
@@ -2660,6 +2697,8 @@ function boot(){
         if(!DB[currentCompany]) currentCompany = Object.keys(DB)[0] || null;
         renderAll();
       }
+      const ctdOverlayEl = document.getElementById('ctdOverlay');
+      if(appStarted && ctdOverlayEl && ctdOverlayEl.classList.contains('show')) renderCtdOverlayContent();
     },
     onUsers: (list)=>{
       if(!seen.users){ seen.users = true; cloudState.usersEmpty = !list || list.length===0; }
@@ -2770,6 +2809,705 @@ if(window.cloudSync){
   // timeout in case the CDN is blocked/offline, so the app still opens.
   window.addEventListener('cloudSyncScriptLoaded', startBoot, {once:true});
   setTimeout(startBoot, 3000);
+}
+
+/* ============ CTD DOSSIER BUILDER ============
+   Builds the full module/section folder structure of a product's CTD
+   registration dossier (numbering per the official EAC/CTD table of
+   contents), lets you upload documents into each section, tracks
+   completion, and exports the whole thing as a ready-to-submit ZIP.
+   File metadata lives inside DB[company].ctd[rowId][sectionCode] — it
+   rides along with the rest of DB via saveDB()/cloudSync.saveCompany(),
+   so it syncs across devices exactly like everything else. The file
+   bytes themselves live in the same Supabase Storage "attachments"
+   bucket already used by the tracker's own field attachments (under a
+   ctd/ prefix) — this deliberately avoids the separate "attachments"
+   Postgres table (which is keyed by a numeric field index), since CTD
+   sections are keyed by string codes instead. */
+
+const CTD_TREE = [
+  { code:'1', title:'الوحدة 1 — المعلومات الإدارية والتنظيمية (Module 1)', children:[
+    { code:'1.1', title:'TABLE OF CONTENTS (Module 1)' },
+    { code:'1.2', title:'Cover letter' },
+    { code:'1.3', title:'Comprehensive table of contents' },
+    { code:'1.4', title:'Quality Information Summary (QIS)' },
+    { code:'1.5', title:'Product information', children:[
+      { code:'1.5.1', title:'Prescribing information (Summary of product characteristics)' },
+      { code:'1.5.2', title:'Container labelling' },
+      { code:'1.5.3', title:'Patient information leaflet (PIL)' },
+      { code:'1.5.4', title:'Mock-ups and specimens' }
+    ]},
+    { code:'1.6', title:'Information about the experts' },
+    { code:'1.7', title:'APIMFs and certificates of suitability to the monographs of the European Pharmacopoeia' },
+    { code:'1.8', title:'Good Manufacturing Practice' },
+    { code:'1.9', title:'Regulatory status within EAC and in countries with SRAs' },
+    { code:'1.10', title:'Paediatric development program' },
+    { code:'1.11', title:'Product samples' },
+    { code:'1.12', title:'Requirement for submission of a risk mitigation plan' },
+    { code:'1.13', title:'Submission of risk management (RMP)' }
+  ]},
+  { code:'2', title:'الوحدة 2 — الملخص الفني المشترك (Module 2)', children:[
+    { code:'2.1', title:'CTD TABLE OF CONTENTS (Modules 2-5)' },
+    { code:'2.2', title:'CTD INTRODUCTION' },
+    { code:'2.3', title:'QUALITY OVERALL SUMMARY', children:[
+      { code:'2.3.S', title:'Drug Substance' },
+      { code:'2.3.P', title:'Drug Product', children:[
+        { code:'2.3.P.1', title:'Description and composition of the Drug Product' },
+        { code:'2.3.P.2', title:'Pharmaceutical Development' },
+        { code:'2.3.P.3', title:'Manufacture' },
+        { code:'2.3.P.4', title:'Control of Excipients' },
+        { code:'2.3.P.5', title:'Control of Drug Product' },
+        { code:'2.3.P.6', title:'Reference Standards or Materials' },
+        { code:'2.3.P.7', title:'Container Closure System' },
+        { code:'2.3.P.8', title:'Stability' }
+      ]},
+      { code:'2.3.A', title:'Appendices' },
+      { code:'2.3.R', title:'Additional Information' }
+    ]},
+    { code:'2.4', title:'Non-Clinical Overview' },
+    { code:'2.5', title:'Clinical Overview' },
+    { code:'2.6', title:'Non-Clinical written and tabulated summary' },
+    { code:'2.7', title:'Clinical Summary' }
+  ]},
+  { code:'3', title:'الوحدة 3 — الجودة (Module 3)', children:[
+    { code:'3.1', title:'MODULE 3 TABLE OF CONTENTS' },
+    { code:'3.2', title:'BODY OF DATA', children:[
+      { code:'3.2.S', title:'DRUG SUBSTANCE', children:[
+        { code:'3.2.S.1', title:'General Information', children:[
+          { code:'3.2.S.1.1', title:'Nomenclature' },
+          { code:'3.2.S.1.2', title:'Structure' },
+          { code:'3.2.S.1.3', title:'General properties' }
+        ]},
+        { code:'3.2.S.2', title:'Manufacture', children:[
+          { code:'3.2.S.2.1', title:'Manufacturer(s)' },
+          { code:'3.2.S.2.2', title:'Description of manufacturing process and process controls' },
+          { code:'3.2.S.2.3', title:'Control of materials' },
+          { code:'3.2.S.2.4', title:'Controls of critical steps and intermediates' },
+          { code:'3.2.S.2.5', title:'Process validation and/or evaluation' },
+          { code:'3.2.S.2.6', title:'Manufacturing process development' }
+        ]},
+        { code:'3.2.S.3', title:'Characterization', children:[
+          { code:'3.2.S.3.1', title:'Elucidation of structure and other characteristics' },
+          { code:'3.2.S.3.2', title:'Impurities' }
+        ]},
+        { code:'3.2.S.4', title:'Control of drug substance', children:[
+          { code:'3.2.S.4.1', title:'Specification' },
+          { code:'3.2.S.4.2', title:'Analytical procedures' },
+          { code:'3.2.S.4.3', title:'Validation of analytical procedures' },
+          { code:'3.2.S.4.4', title:'Batch analyses' },
+          { code:'3.2.S.4.5', title:'Justification of specification' }
+        ]},
+        { code:'3.2.S.5', title:'Reference standards or materials' },
+        { code:'3.2.S.6', title:'Container closure system' },
+        { code:'3.2.S.7', title:'Stability', children:[
+          { code:'3.2.S.7.1', title:'Stability summary and conclusions' },
+          { code:'3.2.S.7.2', title:'Post-approval stability protocol and stability commitment' },
+          { code:'3.2.S.7.3', title:'Stability data' }
+        ]}
+      ]},
+      { code:'3.2.P', title:'DRUG PRODUCT', children:[
+        { code:'3.2.P.1', title:'Description and composition of the drug product' },
+        { code:'3.2.P.2', title:'Pharmaceutical Development', children:[
+          { code:'3.2.P.2.1', title:'Components of the drug product' },
+          { code:'3.2.P.2.2', title:'Drug product' },
+          { code:'3.2.P.2.3', title:'Manufacturing process development' },
+          { code:'3.2.P.2.4', title:'Container closure system' },
+          { code:'3.2.P.2.5', title:'Microbiological attributes' },
+          { code:'3.2.P.2.6', title:'Compatibility' }
+        ]},
+        { code:'3.2.P.3', title:'Manufacture', children:[
+          { code:'3.2.P.3.1', title:'Manufacturer(s)' },
+          { code:'3.2.P.3.2', title:'Batch formula' },
+          { code:'3.2.P.3.3', title:'Description of manufacturing process and process controls' },
+          { code:'3.2.P.3.4', title:'Controls of critical steps and intermediates' },
+          { code:'3.2.P.3.5', title:'Process validation and/or evaluation' }
+        ]},
+        { code:'3.2.P.4', title:'Control of Excipients', children:[
+          { code:'3.2.P.4.1', title:'Specifications' },
+          { code:'3.2.P.4.2', title:'Analytical procedures' },
+          { code:'3.2.P.4.3', title:'Validation of analytical procedures' },
+          { code:'3.2.P.4.4', title:'Justification of specifications' },
+          { code:'3.2.P.4.5', title:'Excipients of human or animal origin' },
+          { code:'3.2.P.4.6', title:'Novel excipients' }
+        ]},
+        { code:'3.2.P.5', title:'Control of Drug Product', children:[
+          { code:'3.2.P.5.1', title:'Specification(s)' },
+          { code:'3.2.P.5.2', title:'Analytical procedures' },
+          { code:'3.2.P.5.3', title:'Validation of analytical procedures' },
+          { code:'3.2.P.5.4', title:'Batch analyses' },
+          { code:'3.2.P.5.5', title:'Characterization of impurities' },
+          { code:'3.2.P.5.6', title:'Justification of specification(s)' }
+        ]},
+        { code:'3.2.P.6', title:'Reference Standards or Materials' },
+        { code:'3.2.P.7', title:'Container Closure System' },
+        { code:'3.2.P.8', title:'Stability', children:[
+          { code:'3.2.P.8.1', title:'Stability summary and conclusion' },
+          { code:'3.2.P.8.2', title:'Post approval stability protocol and stability commitment' },
+          { code:'3.2.P.8.3', title:'Stability data' }
+        ]}
+      ]},
+      { code:'3.2.A', title:'APPENDICES', children:[
+        { code:'3.2.A.1', title:'Facilities and Equipments' },
+        { code:'3.2.A.2', title:'Adventitious Agents Safety Evaluation' },
+        { code:'3.2.A.3', title:'Novel Excipients' }
+      ]},
+      { code:'3.2.R', title:'ADDITIONAL INFORMATION' }
+    ]},
+    { code:'3.3', title:'LITERATURE REFERENCES' }
+  ]},
+  { code:'4', title:'الوحدة 4 — تقارير الدراسات غير الإكلينيكية (Module 4)', children:[
+    { code:'4.1', title:'Table of Contents of Module 4' },
+    { code:'4.2', title:'Study Reports' },
+    { code:'4.3', title:'Literature References' }
+  ]},
+  { code:'5', title:'الوحدة 5 — تقارير الدراسات الإكلينيكية (Module 5)', children:[
+    { code:'5.1', title:'Table of Contents of Module 5' },
+    { code:'5.2', title:'Tabular Listing of all Clinical Studies' },
+    { code:'5.3', title:'Clinical Study Reports', children:[
+      { code:'5.3.1', title:'Reports of Biopharmaceutics Studies', children:[
+        { code:'5.3.1.1', title:'Bio-availability (BA) Study Reports' },
+        { code:'5.3.1.2', title:'Comparative BA and Bio-equivalence (BE) Reports' },
+        { code:'5.3.1.3', title:'In-vitro-In-vivo correlation Reports' },
+        { code:'5.3.1.4', title:'Reports of Bio-analytical and Analytical Methods for Human Studies' }
+      ]},
+      { code:'5.3.2', title:'Reports of Studies Pertinent to Pharmacokinetics using Human Biomaterials' },
+      { code:'5.3.3', title:'Reports of Human Pharmacokinetic (PK) Studies' },
+      { code:'5.3.4', title:'Reports of Human Pharmacodynamic (PD) Studies' },
+      { code:'5.3.5', title:'Reports of Efficacy and Safety Studies' },
+      { code:'5.3.6', title:'Reports of Post-marketing Experience' },
+      { code:'5.3.7', title:'Case Report Forms and Individual Patient listings' }
+    ]},
+    { code:'5.4', title:'Literature References' }
+  ]}
+];
+
+function ctdLeafCodes(nodes, out){
+  out = out || [];
+  (nodes||[]).forEach(n=>{
+    if(n.children && n.children.length) ctdLeafCodes(n.children, out);
+    else out.push(n.code);
+  });
+  return out;
+}
+const CTD_LEAF_CODES = ctdLeafCodes(CTD_TREE);
+
+/* Flat checklist for the "API Listing" tab — per EDA Notice to Applicant
+   EDREX: NP.CAPP.060 "Guidance on submission of Active Pharmaceutical
+   Ingredients for Evaluation of Application (Listing of API / Using Listed
+   API)", Table 2: Required Documents. Not every item applies to every
+   applicant type (A.1/A.2/A.3/B.1/B.2/B.3) — upload whichever apply to the
+   specific case and leave the rest empty. */
+const API_LISTING_ITEMS = [
+  { code:'1', title:'Application Form — نموذج تقديم الطلب على ورقة الشركة، موقّع ومختوم ومؤرخ (Template #1)' },
+  { code:'2', title:'Action Letter (لمنتج تحت التسجيل) أو صورة رخصة التسجيل (لمنتج مسجل)' },
+  { code:'3', title:'الموافقة على الاسم Name approval (لمنتج تحت التسجيل) أو صورة رخصة التسجيل (لمنتج مسجل)' },
+  { code:'4', title:'إيصال سداد الرسوم Fees Payment Receipt' },
+  { code:'5', title:'صورة اعتماد الجودة لملف الـ S-part (Quality Approval of S-part) — لو سبق اعتماده' },
+  { code:'6', title:'ملف الـ Drug Master File كامل بالجزء المقيّد (Restricted Part) من الشركة المصنّعة للخامة — لكل خامة فعّالة' },
+  { code:'7', title:'خطاب تفويض من المورّد Letter of Access' },
+  { code:'8', title:'خطاب إقرار الامتيازات Privilege(s) Declaration Letter (Template #3) — لصاحب رخصة التسجيل فقط' }
+];
+
+let ctdActiveTab = 'ectd';  // 'ectd' | 'apilist'
+let ctdView = 'list';      // 'list' | 'detail'
+let ctdCompany = null;     // company currently shown in the module
+let ctdRowIndex = null;    // row index of the product shown in detail view
+let ctdRowId = null;       // stable row id of that product
+let ctdExpandedCodes = new Set();
+
+function getCtdRowData(company, rowId){
+  const d = DB[company];
+  if(!d || !rowId) return {};
+  if(!d.ctd) d.ctd = {};
+  if(!d.ctd[rowId]) d.ctd[rowId] = {};
+  return d.ctd[rowId];
+}
+function getCtdSectionData(company, rowId, code){
+  const rowData = getCtdRowData(company, rowId);
+  if(!rowData[code]) rowData[code] = { files:[], note:'' };
+  if(!rowData[code].files) rowData[code].files = [];
+  return rowData[code];
+}
+function ctdProductProgress(company, rowId){
+  const rowData = getCtdRowData(company, rowId);
+  let done = 0;
+  CTD_LEAF_CODES.forEach(code=>{ if(rowData[code] && rowData[code].files && rowData[code].files.length) done++; });
+  return { done, total: CTD_LEAF_CODES.length };
+}
+function ctdNodeFileCount(company, rowId, node){
+  const rowData = getCtdRowData(company, rowId);
+  let count = (rowData[node.code] && rowData[node.code].files) ? rowData[node.code].files.length : 0;
+  (node.children||[]).forEach(c=> count += ctdNodeFileCount(company, rowId, c));
+  return count;
+}
+function sanitizeFolderName(s){
+  return String(s||'').replace(/[\\/:*?"<>|]/g,'-').replace(/\s+/g,' ').trim();
+}
+
+/* ---- upload / delete: reuses the shared Storage bucket only, metadata
+   rides inside DB[company].ctd (synced via saveDB -> cloudSync.saveCompany) ---- */
+function uploadCtdFile(company, rowId, code, file){
+  const attId = genAttId();
+  const path = `ctd/${rowId}/${code}/${attId}_${sanitizeForPath(file.name)}`;
+  if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){
+    return Promise.reject(new Error('offline'));
+  }
+  return window.cloudSync.uploadAttachmentFile(path, file).then(()=>{
+    const url = window.cloudSync.getAttachmentPublicUrl(path);
+    const rec = {
+      id: attId, name: file.name, url, path, sizeKB: Math.round(file.size/1024),
+      date: new Date().toISOString().slice(0,10),
+      uploadedBy: currentUser ? currentUser.username : ''
+    };
+    getCtdSectionData(company, rowId, code).files.push(rec);
+    saveDB();
+    return rec;
+  });
+}
+function deleteCtdFile(company, rowId, code, fileId){
+  const sec = getCtdSectionData(company, rowId, code);
+  const existing = sec.files.find(f=> f.id===fileId);
+  sec.files = sec.files.filter(f=> f.id!==fileId);
+  saveDB();
+  if(existing && existing.path && window.cloudSync) window.cloudSync.deleteAttachmentFile(existing.path);
+  return existing;
+}
+function ctdFindFile(code, fileId){
+  return getCtdSectionData(ctdCompany, ctdRowId, code).files.find(f=> f.id===fileId);
+}
+
+/* ---- API Listing: same storage pattern as eCTD above, but flat (no tree) and
+   keyed under DB[company].apiListing instead of DB[company].ctd ---- */
+function getApiListingRowData(company, rowId){
+  const d = DB[company];
+  if(!d || !rowId) return {};
+  if(!d.apiListing) d.apiListing = {};
+  if(!d.apiListing[rowId]) d.apiListing[rowId] = {};
+  return d.apiListing[rowId];
+}
+function getApiListingItemData(company, rowId, code){
+  const rowData = getApiListingRowData(company, rowId);
+  if(!rowData[code]) rowData[code] = { files:[], note:'' };
+  if(!rowData[code].files) rowData[code].files = [];
+  return rowData[code];
+}
+function apiListingProgress(company, rowId){
+  const rowData = getApiListingRowData(company, rowId);
+  let done = 0;
+  API_LISTING_ITEMS.forEach(item=>{ if(rowData[item.code] && rowData[item.code].files && rowData[item.code].files.length) done++; });
+  return { done, total: API_LISTING_ITEMS.length };
+}
+function uploadApiListingFile(company, rowId, code, file){
+  const attId = genAttId();
+  const path = `apilisting/${rowId}/${code}/${attId}_${sanitizeForPath(file.name)}`;
+  if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){
+    return Promise.reject(new Error('offline'));
+  }
+  return window.cloudSync.uploadAttachmentFile(path, file).then(()=>{
+    const url = window.cloudSync.getAttachmentPublicUrl(path);
+    const rec = {
+      id: attId, name: file.name, url, path, sizeKB: Math.round(file.size/1024),
+      date: new Date().toISOString().slice(0,10),
+      uploadedBy: currentUser ? currentUser.username : ''
+    };
+    getApiListingItemData(company, rowId, code).files.push(rec);
+    saveDB();
+    return rec;
+  });
+}
+function deleteApiListingFile(company, rowId, code, fileId){
+  const sec = getApiListingItemData(company, rowId, code);
+  const existing = sec.files.find(f=> f.id===fileId);
+  sec.files = sec.files.filter(f=> f.id!==fileId);
+  saveDB();
+  if(existing && existing.path && window.cloudSync) window.cloudSync.deleteAttachmentFile(existing.path);
+  return existing;
+}
+function apiListingFindFile(code, fileId){
+  return getApiListingItemData(ctdCompany, ctdRowId, code).files.find(f=> f.id===fileId);
+}
+function ctdActiveProgress(company, rowId){
+  return ctdActiveTab==='ectd' ? ctdProductProgress(company, rowId) : apiListingProgress(company, rowId);
+}
+
+/* ---- opening / navigating the module ---- */
+function openCtdModule(){
+  ctdCompany = currentCompany || Object.keys(DB)[0] || null;
+  ctdActiveTab = 'ectd';
+  ctdView = 'list';
+  renderCtdOverlayContent();
+  document.getElementById('ctdOverlay').classList.add('show');
+}
+function openCtdForCurrentProduct(){
+  if(!currentCompany || editingRowIndex===null || !currentRowId){ toast('احفظ المنتج أولاً'); return; }
+  ctdCompany = currentCompany;
+  ctdRowIndex = editingRowIndex;
+  ctdRowId = currentRowId;
+  ctdActiveTab = 'ectd';
+  ctdView = 'detail';
+  ctdExpandedCodes = new Set(CTD_TREE.map(n=> n.code));
+  renderCtdOverlayContent();
+  document.getElementById('ctdOverlay').classList.add('show');
+}
+function closeCtd(){ document.getElementById('ctdOverlay').classList.remove('show'); }
+function ctdBack(){
+  ctdView = 'list';
+  renderCtdOverlayContent();
+}
+function ctdSwitchTab(tab){
+  ctdActiveTab = tab;
+  renderCtdOverlayContent();
+}
+function ctdSelectCompany(name){ ctdCompany = name; renderCtdOverlayContent(); }
+function ctdOpenProductDetail(rowIndex){
+  ctdRowIndex = rowIndex;
+  ctdRowId = ensureRowId(ctdCompany, rowIndex);
+  ctdView = 'detail';
+  ctdExpandedCodes = new Set(CTD_TREE.map(n=> n.code));
+  renderCtdOverlayContent();
+}
+function ctdToggle(code, isOpen){
+  if(isOpen) ctdExpandedCodes.add(code); else ctdExpandedCodes.delete(code);
+}
+
+/* ---- rendering ---- */
+function renderCtdOverlayContent(){
+  const body = document.getElementById('ctdBody');
+  const prevScroll = body.scrollTop;
+  const tabsHtml = `
+    <div class="ctd-tabs">
+      <button class="ctd-tab-btn ${ctdActiveTab==='ectd'?'active':''}" onclick="ctdSwitchTab('ectd')">eCTD</button>
+      <button class="ctd-tab-btn ${ctdActiveTab==='apilist'?'active':''}" onclick="ctdSwitchTab('apilist')">API Listing</button>
+    </div>`;
+  let contentHtml;
+  if(ctdView === 'list'){
+    contentHtml = renderCtdListHtml();
+  } else {
+    const d = DB[ctdCompany];
+    const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+    const row = d ? d.rows[ctdRowIndex] : null;
+    const productName = (nameIdx>=0 && row) ? row[nameIdx] : ('منتج #' + (ctdRowIndex+1));
+    contentHtml = ctdActiveTab==='ectd' ? renderCtdDetailHtml(productName) : renderApiListingDetailHtml(productName);
+  }
+  body.innerHTML = tabsHtml + contentHtml;
+  body.scrollTop = prevScroll;
+}
+function renderCtdListHtml(){
+  const companies = Object.keys(DB);
+  if(!companies.length){
+    return `<div class="empty"><div class="icon">📂</div>أضف شركة ومنتجات أولاً من الشاشة الرئيسية</div>`;
+  }
+  if(!ctdCompany || !DB[ctdCompany]) ctdCompany = companies[0];
+  const d = DB[ctdCompany];
+  const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+  const apiIdx = findFieldIndex(ctdCompany, ['api']);
+  const companySelect = `<div class="field-row" style="max-width:340px">
+      <label>الشركة / الملف</label>
+      <select onchange="ctdSelectCompany(this.value)">
+        ${companies.map(c=> `<option value="${escAttr(c)}" ${c===ctdCompany?'selected':''}>${esc(c)}</option>`).join('')}
+      </select>
+    </div>`;
+  const hint = ctdActiveTab==='ectd'
+    ? `<div class="hint-box">ابنِ ملف الـ eCTD كامل (بترقيم الوحدات والأقسام الرسمي) لكل منتج على حدة — ارفع المستندات في كل قسم، وتابع نسبة الاكتمال، وصدّر الملف بالكامل كملف ZIP جاهز للتسليم.</div>`
+    : `<div class="hint-box">جهّز مستندات طلب الـ API Listing / Using Listed API لكل منتج طبقًا لدليل الهيئة (قرار رئيس الهيئة 213/2023) — مش كل المستندات الـ8 لازم تنطبق على كل الحالات، ارفع اللي يخص حالتك بس.</div>`;
+  if(!d.rows.length){
+    return `${hint}${companySelect}<div class="empty"><div class="icon">📦</div>لا توجد منتجات في هذه الشركة بعد</div>`;
+  }
+  const cards = d.rows.map((r,i)=>{
+    const rowId = ensureRowId(ctdCompany, i);
+    const prog = ctdActiveProgress(ctdCompany, rowId);
+    const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
+    const pname = nameIdx>=0 ? (r[nameIdx]||'—') : '—';
+    const papi = apiIdx>=0 ? (r[apiIdx]||'') : '';
+    const unit = ctdActiveTab==='ectd' ? 'قسم' : 'مستند';
+    return `<div class="pcard" onclick="ctdOpenProductDetail(${i})">
+        <div class="pname">${esc(pname)}</div>
+        <div class="papi">${esc(papi)}</div>
+        <div class="ctd-progress-bar"><div class="ctd-progress-fill" style="width:${pct}%"></div></div>
+        <div class="meta"><span>${prog.done} / ${prog.total} ${unit} مكتمل</span><span>${pct}%</span></div>
+      </div>`;
+  }).join('');
+  return `${hint}${companySelect}<div class="products">${cards}</div>`;
+}
+function renderCtdDetailHtml(productName){
+  const prog = ctdProductProgress(ctdCompany, ctdRowId);
+  const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
+  const treeHtml = CTD_TREE.map(n=> renderCtdNode(n, 0)).join('');
+  return `
+    <div class="section-title">📦 ${esc(productName)}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <div style="flex:1;min-width:220px">
+        <div class="ctd-progress-bar"><div class="ctd-progress-fill" style="width:${pct}%"></div></div>
+        <div class="meta" style="margin-top:6px"><span>${prog.done} / ${prog.total} قسم مكتمل</span><span>${pct}%</span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline" onclick="ctdBack()">⬅ قائمة المنتجات</button>
+        <button class="btn btn-gold" onclick="exportCtdZip('${escAttr(productName)}')">⇩ تصدير الملف كـ ZIP</button>
+      </div>
+    </div>
+    <div class="ctd-tree">${treeHtml}</div>
+  `;
+}
+function renderApiListingItem(item){
+  const sec = getApiListingItemData(ctdCompany, ctdRowId, item.code);
+  const fileListHtml = sec.files.length ? sec.files.map(f=>`
+      <div class="att-item">
+        <span class="att-name">📄 ${esc(f.name)}</span>
+        <span class="att-meta">${f.sizeKB} ك.ب · ${f.date}</span>
+        <span class="att-actions">
+          <button class="btn btn-outline" onclick="apiListingViewFile('${escAttr(item.code)}','${escAttr(f.id)}')">عرض</button>
+          <button class="btn btn-outline" onclick="apiListingDownloadFile('${escAttr(item.code)}','${escAttr(f.id)}')">تنزيل</button>
+          <button class="btn btn-red" onclick="apiListingRemoveFile('${escAttr(item.code)}','${escAttr(f.id)}')">حذف</button>
+        </span>
+      </div>`).join('') : `<div class="att-empty">لسه مفيش مستند لهذا البند</div>`;
+  return `
+    <div class="ctd-node">
+      <div class="ctd-node-head-static">
+        <span class="ctd-node-code">${esc(item.code)}</span>
+        <span class="ctd-node-title">${esc(item.title)}</span>
+        ${sec.files.length ? `<span class="ctd-file-badge">📎 ${sec.files.length}</span>` : ''}
+      </div>
+      <div class="ctd-node-body">
+        ${fileListHtml}
+        <label class="btn btn-outline att-upload-btn">
+          ＋ إرفاق مستند لهذا البند
+          <input type="file" multiple style="display:none" onchange="apiListingHandleUpload(event,'${escAttr(item.code)}')">
+        </label>
+      </div>
+    </div>`;
+}
+function renderApiListingDetailHtml(productName){
+  const prog = apiListingProgress(ctdCompany, ctdRowId);
+  const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
+  const itemsHtml = API_LISTING_ITEMS.map(renderApiListingItem).join('');
+  return `
+    <div class="section-title">📦 ${esc(productName)}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <div style="flex:1;min-width:220px">
+        <div class="ctd-progress-bar"><div class="ctd-progress-fill" style="width:${pct}%"></div></div>
+        <div class="meta" style="margin-top:6px"><span>${prog.done} / ${prog.total} مستند مكتمل</span><span>${pct}%</span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline" onclick="ctdBack()">⬅ قائمة المنتجات</button>
+        <button class="btn btn-gold" onclick="exportApiListingZip('${escAttr(productName)}')">⇩ تصدير المستندات كـ ZIP</button>
+      </div>
+    </div>
+    <div class="ctd-tree">${itemsHtml}</div>
+  `;
+}
+function renderCtdNode(node, depth){
+  const sec = getCtdSectionData(ctdCompany, ctdRowId, node.code);
+  const hasChildren = node.children && node.children.length;
+  const totalFiles = ctdNodeFileCount(ctdCompany, ctdRowId, node);
+  const childrenHtml = hasChildren ? node.children.map(c=> renderCtdNode(c, depth+1)).join('') : '';
+  const fileListHtml = sec.files.length ? sec.files.map(f=>`
+      <div class="att-item">
+        <span class="att-name">📄 ${esc(f.name)}</span>
+        <span class="att-meta">${f.sizeKB} ك.ب · ${f.date}</span>
+        <span class="att-actions">
+          <button class="btn btn-outline" onclick="event.stopPropagation();ctdViewFile('${escAttr(node.code)}','${escAttr(f.id)}')">عرض</button>
+          <button class="btn btn-outline" onclick="event.stopPropagation();ctdDownloadFile('${escAttr(node.code)}','${escAttr(f.id)}')">تنزيل</button>
+          <button class="btn btn-red" onclick="event.stopPropagation();ctdRemoveFile('${escAttr(node.code)}','${escAttr(f.id)}')">حذف</button>
+        </span>
+      </div>`).join('') : `<div class="att-empty">لا توجد مستندات في هذا القسم بعد</div>`;
+  const open = ctdExpandedCodes.has(node.code) ? 'open' : '';
+  return `
+    <details class="ctd-node" style="margin-inline-start:${depth*16}px" ${open} ontoggle="ctdToggle('${escAttr(node.code)}', this.open)">
+      <summary class="ctd-node-head">
+        <span class="ctd-node-code">${esc(node.code)}</span>
+        <span class="ctd-node-title">${esc(node.title)}</span>
+        ${totalFiles ? `<span class="ctd-file-badge">📎 ${totalFiles}</span>` : ''}
+      </summary>
+      <div class="ctd-node-body">
+        ${fileListHtml}
+        <label class="btn btn-outline att-upload-btn">
+          ＋ إرفاق مستند لهذا القسم
+          <input type="file" multiple style="display:none" onchange="ctdHandleUpload(event,'${escAttr(node.code)}')">
+        </label>
+        ${childrenHtml}
+      </div>
+    </details>`;
+}
+
+/* ---- file actions ---- */
+function ctdHandleUpload(e, code){
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  toast(files.length>1 ? `جارٍ رفع ${files.length} ملفات...` : 'جارٍ رفع الملف...');
+  Promise.all(files.map(f=> uploadCtdFile(ctdCompany, ctdRowId, code, f)))
+    .then(()=>{
+      renderCtdOverlayContent();
+      toast('تم إرفاق المستند بنجاح ✓');
+      if(currentUser){
+        const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+        const row = DB[ctdCompany].rows[ctdRowIndex];
+        const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+        pushChangeLog({
+          username: currentUser.username, role: currentUser.role,
+          company: ctdCompany, product: productName, rowId: ctdRowId,
+          action: 'رفع مستند CTD',
+          changes: files.map(f=> ({field: 'CTD ' + code, idx: code, from:'', to: f.name}))
+        });
+      }
+    })
+    .catch(err=>{
+      console.warn('ctd upload failed', err);
+      toast('تعذر رفع المستند — تأكد من الاتصال بالإنترنت وحاول تاني');
+    });
+  e.target.value = '';
+}
+function ctdViewFile(code, fileId){
+  const f = ctdFindFile(code, fileId);
+  if(!f || !f.url){ toast('تعذر فتح المستند'); return; }
+  window.open(f.url, '_blank');
+}
+function ctdDownloadFile(code, fileId){
+  const f = ctdFindFile(code, fileId);
+  if(!f || !f.url){ toast('تعذر تنزيل المستند'); return; }
+  const url = f.url + (f.url.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(f.name);
+  const link = document.createElement('a');
+  link.href = url; link.download = f.name; link.target = '_blank';
+  document.body.appendChild(link); link.click(); link.remove();
+}
+function ctdRemoveFile(code, fileId){
+  if(!confirm('هل تريد حذف هذا المستند؟')) return;
+  const existing = deleteCtdFile(ctdCompany, ctdRowId, code, fileId);
+  renderCtdOverlayContent();
+  toast('تم حذف المستند');
+  if(currentUser && existing){
+    const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+    const row = DB[ctdCompany].rows[ctdRowIndex];
+    const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+    pushChangeLog({
+      username: currentUser.username, role: currentUser.role,
+      company: ctdCompany, product: productName, rowId: ctdRowId,
+      action: 'حذف مستند CTD',
+      changes: [{field: 'CTD ' + code, idx: code, from: existing.name, to: ''}]
+    });
+  }
+}
+
+/* ---- API Listing file actions ---- */
+function apiListingHandleUpload(e, code){
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  toast(files.length>1 ? `جارٍ رفع ${files.length} ملفات...` : 'جارٍ رفع الملف...');
+  Promise.all(files.map(f=> uploadApiListingFile(ctdCompany, ctdRowId, code, f)))
+    .then(()=>{
+      renderCtdOverlayContent();
+      toast('تم إرفاق المستند بنجاح ✓');
+      if(currentUser){
+        const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+        const row = DB[ctdCompany].rows[ctdRowIndex];
+        const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+        pushChangeLog({
+          username: currentUser.username, role: currentUser.role,
+          company: ctdCompany, product: productName, rowId: ctdRowId,
+          action: 'رفع مستند API Listing',
+          changes: files.map(f=> ({field: 'API Listing ' + code, idx: code, from:'', to: f.name}))
+        });
+      }
+    })
+    .catch(err=>{
+      console.warn('api listing upload failed', err);
+      toast('تعذر رفع المستند — تأكد من الاتصال بالإنترنت وحاول تاني');
+    });
+  e.target.value = '';
+}
+function apiListingViewFile(code, fileId){
+  const f = apiListingFindFile(code, fileId);
+  if(!f || !f.url){ toast('تعذر فتح المستند'); return; }
+  window.open(f.url, '_blank');
+}
+function apiListingDownloadFile(code, fileId){
+  const f = apiListingFindFile(code, fileId);
+  if(!f || !f.url){ toast('تعذر تنزيل المستند'); return; }
+  const url = f.url + (f.url.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(f.name);
+  const link = document.createElement('a');
+  link.href = url; link.download = f.name; link.target = '_blank';
+  document.body.appendChild(link); link.click(); link.remove();
+}
+function apiListingRemoveFile(code, fileId){
+  if(!confirm('هل تريد حذف هذا المستند؟')) return;
+  const existing = deleteApiListingFile(ctdCompany, ctdRowId, code, fileId);
+  renderCtdOverlayContent();
+  toast('تم حذف المستند');
+  if(currentUser && existing){
+    const nameIdx = findFieldIndex(ctdCompany, ['product name']);
+    const row = DB[ctdCompany].rows[ctdRowIndex];
+    const productName = (nameIdx>=0 && row) ? row[nameIdx] : '';
+    pushChangeLog({
+      username: currentUser.username, role: currentUser.role,
+      company: ctdCompany, product: productName, rowId: ctdRowId,
+      action: 'حذف مستند API Listing',
+      changes: [{field: 'API Listing ' + code, idx: code, from: existing.name, to: ''}]
+    });
+  }
+}
+function exportApiListingZip(productName){
+  if(!window.JSZip){ toast('تعذر تحميل مكتبة ضغط الملفات — تأكد من الاتصال بالإنترنت'); return; }
+  toast('جارٍ تجهيز مستندات الـ API Listing...');
+  const zip = new JSZip();
+  const rowData = getApiListingRowData(ctdCompany, ctdRowId);
+  const filePromises = [];
+  API_LISTING_ITEMS.forEach(item=>{
+    const label = sanitizeFolderName(`${item.code} - ${item.title}`) || item.code;
+    const sub = zip.folder(label);
+    const sec = rowData[item.code];
+    (sec && sec.files ? sec.files : []).forEach(f=>{
+      filePromises.push(fetch(f.url).then(r=> r.blob()).then(blob=> sub.file(sanitizeFolderName(f.name) || 'file', blob)));
+    });
+  });
+  Promise.all(filePromises)
+    .then(()=> zip.generateAsync({type:'blob'}))
+    .then(blob=>{
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${sanitizeFolderName(productName || 'API Listing')} - API Listing.zip`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(()=> URL.revokeObjectURL(url), 5000);
+      toast('تم تجهيز ملف الـ ZIP ✓');
+    })
+    .catch(err=>{
+      console.warn('api listing export failed', err);
+      toast('تعذر تجهيز ملف الـ ZIP — تأكد من الاتصال بالإنترنت وحاول تاني');
+    });
+}
+
+/* ---- export the whole dossier as a ZIP, folders named "code - title" ---- */
+function exportCtdZip(productName){
+  if(!window.JSZip){ toast('تعذر تحميل مكتبة ضغط الملفات — تأكد من الاتصال بالإنترنت'); return; }
+  toast('جارٍ تجهيز ملف الـ CTD...');
+  const zip = new JSZip();
+  const rowData = getCtdRowData(ctdCompany, ctdRowId);
+
+  function addNode(node, folder){
+    const label = sanitizeFolderName(`${node.code} - ${node.title}`) || node.code;
+    const sub = folder.folder(label);
+    const sec = rowData[node.code];
+    const filePromises = (sec && sec.files ? sec.files : []).map(f=>
+      fetch(f.url).then(r=> r.blob()).then(blob=> sub.file(sanitizeFolderName(f.name) || 'file', blob))
+    );
+    const childPromises = (node.children||[]).map(c=> addNode(c, sub));
+    return Promise.all(filePromises.concat(childPromises));
+  }
+
+  Promise.all(CTD_TREE.map(n=> addNode(n, zip)))
+    .then(()=> zip.generateAsync({type:'blob'}))
+    .then(blob=>{
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${sanitizeFolderName(productName || 'CTD')} - CTD.zip`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(()=> URL.revokeObjectURL(url), 5000);
+      toast('تم تجهيز ملف الـ ZIP ✓');
+    })
+    .catch(err=>{
+      console.warn('ctd export failed', err);
+      toast('تعذر تجهيز ملف الـ ZIP — تأكد من الاتصال بالإنترنت وحاول تاني');
+    });
 }
 </script>
 </body>
