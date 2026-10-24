@@ -354,12 +354,14 @@ body{margin:0;font-family:"Segoe UI","Tahoma",Arial,sans-serif;background:var(--
 .att-upload-btn{cursor:pointer;display:inline-flex;padding:7px 12px;font-size:12px}
 .hint-box{font-size:12.5px;color:var(--navy);background:var(--blue-bg);padding:10px 14px;border-radius:9px;margin-bottom:16px}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
 .modal-foot{padding:14px 22px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
 @media(max-width:760px){
   .sidebar{position:fixed;right:-280px;height:100%;z-index:50;transition:.2s}
   .sidebar.open{right:0}
   .main{padding:14px}
   .two-col{grid-template-columns:1fr}
+  .three-col{grid-template-columns:1fr}
   .mobile-toggle{display:block!important}
 }
 .mobile-toggle{display:none;background:var(--navy);color:#fff;border:none;padding:8px 12px;border-radius:8px;margin-bottom:10px}
@@ -457,6 +459,9 @@ details[open]>.ctd-node-head::before{transform:rotate(90deg)}
 .gl-head{background:color-mix(in srgb,var(--mc) 12%,transparent);font-weight:700}
 .gl-head .ctd-node-title{color:var(--mc)}
 .gl-date{font-size:12px;font-weight:700;color:var(--mc);background:#fff;border:1px solid var(--mc);border-radius:20px;padding:1px 9px}
+.var-desc{font-size:12px;color:var(--muted);line-height:1.6;margin:2px 0 8px;white-space:pre-wrap}
+.var-apply{margin-inline-start:auto;font-size:11.5px;font-weight:700;display:inline-flex;align-items:center;gap:4px;cursor:pointer;background:rgba(255,255,255,.85);color:#1b2a3a;border-radius:20px;padding:1px 9px;flex-shrink:0}
+.ctd-ltr .ctd-node-body .var-desc{text-align:left}
 .ctd-tab-wrap{display:flex;align-items:center;border-bottom:2px solid transparent;margin-bottom:-1px}
 .ctd-tab-wrap.active{border-bottom-color:var(--gold)}
 .ctd-tab-wrap .ctd-tab-btn{border-bottom:none;margin-bottom:0;padding-inline-end:4px}
@@ -551,6 +556,7 @@ details[open]>.ctd-node-head::before{transform:rotate(90deg)}
       <button onclick="document.getElementById('restoreFile').click()">⇪ استعادة نسخة احتياطية</button>
       <button onclick="openReports()">📊 التقارير</button>
       <button onclick="openCtdModule()">📁 ملفات Human Drug - Quality</button>
+      <button onclick="openVariations()">🔄 Human Pharmaceutical Variations</button>
       <button onclick="openLinks()">🔗 روابط أقسام الهيئة</button>
       <button id="adminPanelBtn" style="display:none" onclick="openAdminPanel()">🛡 لوحة الإدارة</button>
       <input type="file" id="importFile" accept=".xlsx,.xls" onchange="handleImportExcel(event)">
@@ -696,6 +702,16 @@ details[open]>.ctd-node-head::before{transform:rotate(90deg)}
       <button class="x" onclick="closeCtd()">✕</button>
     </div>
     <div class="modal-body" id="ctdBody"></div>
+  </div>
+</div>
+
+<div class="overlay" id="variationsOverlay">
+  <div class="modal" style="max-width:1100px">
+    <div class="modal-head">
+      <h3>🔄 Human Pharmaceutical Variations</h3>
+      <button class="x" onclick="closeVariations()">✕</button>
+    </div>
+    <div class="modal-body" id="varBody"></div>
   </div>
 </div>
 
@@ -2555,11 +2571,15 @@ function renderReportsBody(){
       <button class="btn btn-outline" onclick="exportReportFullExcel()">⇩ ملف Excel كامل (كل البيانات)</button>
     </div>
     <div class="section-title">تقرير مفصل عن منتج محدد</div>
-    <div class="hint-box">اختر الشركة ثم المنتج لعرض كل بياناته بالتفصيل مرحلة بمرحلة، ويمكنك تصدير هذا التقرير كملف PDF مستقل بالمنتج.</div>
-    <div class="two-col" style="margin-bottom:14px">
+    <div class="hint-box">اختر الشركة ثم القرار (Decree) ثم المنتج لعرض كل بياناته بالتفصيل مرحلة بمرحلة، ويمكنك تصدير هذا التقرير كملف PDF مستقل بالمنتج.</div>
+    <div class="three-col" style="margin-bottom:14px">
       <div class="field-row">
         <label>الشركة / الملف</label>
         <select id="reportCompanySelect" onchange="onReportCompanyChange()"></select>
+      </div>
+      <div class="field-row">
+        <label>القرار (Decree)</label>
+        <select id="reportDecreeSelect" onchange="populateReportProductSelect()"></select>
       </div>
       <div class="field-row">
         <label>المنتج</label>
@@ -2572,6 +2592,1103 @@ function renderReportsBody(){
     <div id="productDetailReportBody"></div>
   `;
   initProductDetailReportSelectors();
+}
+
+/* ---- Tree of required documents — EDA "Notice to Applicant: Administrative &
+   Relevant Documents & Time frame for human pharmaceutical variations"
+   (Code EDREX:NP.CAPP.109, Version 2/2026). Transcribed up to section 5.53
+   (complete) — the pages after that were not provided yet. To extend it,
+   add nodes at the end of the "III" group. ---- */
+const VL = (code, title, desc)=> ({ code, title, desc: desc || '', children: [] });
+const VG = (code, title, children, desc)=> ({ code, title, desc: desc || '', children });
+/* Module 3 structure printed in the notice (section VI) — parent = code minus its last segment */
+const VCTD_LINES = `3.1|Table of Contents of Module
+3.2|Body of Data
+3.2.S|DRUG SUBSTANCE
+3.2.S.1|General Information
+3.2.S.1.1|Nomenclature
+3.2.S.1.2|Structure
+3.2.S.1.3|General Properties
+3.2.S.2|Manufacture
+3.2.S.2.1|Manufacturer(s)
+3.2.S.2.2|Description of Manufacturing Process and Process Controls
+3.2.S.2.3|Control of materials
+3.2.S.2.4|Controls of critical steps and intermediates
+3.2.S.2.5|Process validation and/or evaluation
+3.2.S.2.6|Manufacturing process development
+3.2.S.3|Characterization
+3.2.S.3.1|Elucidation of structure and other characteristics
+3.2.S.3.2|Impurities
+3.2.S.4|Control of the API
+3.2.S.4.1|Specification
+3.2.S.4.2|Analytical procedures
+3.2.S.4.3|Validation of analytical procedures
+3.2.S.4.4|Batch analyses
+3.2.S.4.5|Justification of specification
+3.2.S.5|Reference standards or materials
+3.2.S.6|Container-closure system
+3.2.S.7|Stability
+3.2.S.7.1|Stability summary and conclusions
+3.2.S.7.2|Post-approval stability protocol and stability commitment
+3.2.P|DRUG PRODUCT (OR FINISHED PHARMACEUTICAL PRODUCT (FPP))
+3.2.P.1|Description and composition of the FPP
+3.2.P.2|Pharmaceutical Development
+3.2.P.2.1|Components of the FPP
+3.2.P.2.1.1|Active pharmaceutical ingredient
+3.2.P.2.1.2|Excipients
+3.2.P.2.2|Finished pharmaceutical product
+3.2.P.2.2.1|Formulation development
+3.2.P.2.2.2|Overages
+3.2.P.2.2.3|Physicochemical and biological properties
+3.2.P.2.3|Manufacturing process development
+3.2.P.2.4|Container-closure system
+3.2.P.2.5|Microbiological attributes
+3.2.P.2.6|Compatibility
+3.2.P.3|Manufacture
+3.2.P.3.1|Manufacturer(s)
+3.2.P.3.2|Batch formula
+3.2.P.3.3|Description of manufacturing process and process controls
+3.2.P.3.4|Controls of critical steps and intermediates
+3.2.P.3.5|Process validation and/or evaluation
+3.2.P.4|Control of excipients
+3.2.P.4.1|Specifications
+3.2.P.4.2|Analytical procedures
+3.2.P.4.3|Validation of analytical procedures
+3.2.P.4.4|Justification of specifications
+3.2.P.4.5|Excipients of human or animal origin
+3.2.P.4.6|Novel excipients
+3.2.P.5|Control of FPP
+3.2.P.5.1|Specifications
+3.2.P.5.2|Analytical procedures
+3.2.P.5.3|Validation of analytical procedures
+3.2.P.5.4|Batch analyses
+3.2.P.5.5|Characterization of impurities
+3.2.P.5.6|Justification of specification(s)
+3.2.P.6|Reference standards or materials
+3.2.P.7|Container-closure system
+3.2.P.8|Stability
+3.2.P.8.1|Stability summary and conclusions
+3.2.P.8.2|Post-approval stability protocol and stability commitment
+3.2.P.8.3|Stability data
+3.2.A|APPENDICES
+3.2.A.1|Facilities and Equipment
+3.2.A.2|Adventitious Agents Safety Evaluation
+3.2.A.3|Excipients
+3.2.R|Regional information
+3.2.R.1|Production documentation
+3.2.R.1.1|Executed production documents
+3.2.R.1.2|Master production documents
+3.2.R.2|Analytical procedures and validation information
+3.3|Literature References`;
+function VCTD_STRUCT(){
+  const byCode = {}, roots = [];
+  VCTD_LINES.split('\n').forEach(line=>{
+    const i = line.indexOf('|');
+    const code = line.slice(0, i), title = line.slice(i+1);
+    const node = VG(code, code + ' ' + title, []);
+    if(code === '3.2.P.5') node.desc = 'Printed as "3.2.P.4 Control of FPP" in the notice; its sub-sections are numbered 3.2.P.5.x.';
+    if(code === '3.2.R') node.desc = 'This heading is not printed in the notice; added as the parent of 3.2.R.1 and 3.2.R.2.';
+    byCode[code] = node;
+    let pc = code.split('.').slice(0, -1).join('.');
+    while(pc && !byCode[pc]) pc = pc.split('.').slice(0, -1).join('.');
+    (pc ? byCode[pc].children : roots).push(node);
+  });
+  return roots;
+}
+const VF = (code, amt)=> VL(code, 'Fees: ' + (amt || '1000 L.E.'));
+const VAM = (code)=> VL(code, 'Amendment of the relevant section(s) of the dossier');
+const VCTD = (code)=> VL(code, 'All updated relevant sections of the CTD part related to the new change');
+const VCOAO = (code)=> VL(code, 'COAs of Old Packs', `Containing full detailed description for type of pack, its capacity and liner.`);
+const VCOAN = (code)=> VL(code, 'COAs of New Packs from suppliers', `Containing full detailed description for type of pack, its capacity and liner.`);
+const VSMP = (code)=> VL(code, 'Sample');
+const VFR = (code)=> VL(code, 'Fees: 1000 L.E.', `In addition to additional fees concerning consequential variations.`);
+const VAR_TREE = [
+  VG('II', 'II) Common Administrative Documents', [
+    VG('S1', 'Section (1): Variation Application form (Signed and Stamped) + Payment Receipt', [
+      VL('S1.1', 'Variation Application form', `Signed and stamped.`),
+      VL('S1.2', 'Payment Receipt')
+    ]),
+    VG('S2', 'Section (2): EDA License & Approvals', [
+      VL('S2.1', 'EDA Valid Registration License', `If Final & invalid: valid approval for registration renewal. If Tentative & invalid: license validity extension approval or approval for submission from Tent. to final.`),
+      VL('S2.2', 'Any other EDA or Variation approvals or any Exemptions for the product'),
+      VL('S2.3', 'Minister decree 600 exemption (If needed)'),
+      VL('S2.4', 'Any Previous Stability Approvals', `Accelerated Stability or Long-term Stability.`),
+      VL('S2.5', 'Leaflet of the product and innovator'),
+      VL('S2.6', 'EDA labs certificate of analysis'),
+      VL('S2.7', 'EDA labs composition certificate'),
+      VL('S2.8', 'Updated Pricing License')
+    ]),
+    VG('S3', 'Section (3): Other Documents (In Case of Imported / UL Products)', [
+      VL('S3.1', 'Valid CPP (With All Attachment)', `Authenticated by the Health Authority in COO, Chamber of commerce or Notary & Egyptian consulate/embassy. OR Electronic CPP & Declaration Letter from the Applicant clarifying the authorized link for its Online Verification.`),
+      VL('S3.2', 'Declaration Letter from LH/MAH in COO', `Clarifies the changes. If the change(s) stated in the CPP: signed and stamped. If the change(s) not stated in the CPP (2ry packager / batch release site): authenticated from Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+      VL('S3.3', 'Declaration Letter from LH/MAH in COO signed and stamped', `Stating the reasons of change.`),
+      VL('S3.4', 'CTD', `Part related to required change.`)
+    ]),
+    VG('S4', 'Section (4): Applicant Documents', [
+      VL('S4.1', 'Last Updated Commercial Register'),
+      VL('S4.2', 'Last Updated Toll Card', `In case of toll companies.`),
+      VL('S4.3', 'Last Updated Manufacturing License', `In case of local companies.`),
+      VL('S4.4', 'Scientific Office License', `In case of scientific office.`),
+      VL('S4.5', 'Imported Finished Human Pharmaceutical Product — Applicant documents', `Scientific Office: a) Authorization letter for the Scientific Office to register finished imported human pharmaceutical products, issued by Evaluation Unit of registration requests for human pharmaceuticals; b) Declarations Letter clarifying the Company's profile Code, signed & stamped. Company: Declarations Letter clarifying the Company's profile Code describing its activity as "Company Authorized for Registration"; if not available the company must apply to Systems & Information Unit for creating a company profile. N.B.: if Applicant Change for the imported finished product is needed, submit a separate fulfilled file (as check list) for the Applicant change.`)
+    ])
+  ]),
+  VG('III', 'III) Relevant Documents According to the Variation Type (Section 5)', [
+    VG('5.1', '5.1. Change in Name / Address of Finished product LH/MAH', [
+      VG('5.1.A', 'A- For Local FPP', [
+        VL('5.1.A.1', 'Fees: 1000 L.E.'),
+        VL('5.1.A.2', 'Last Updated Commercial Register of the Company', `Mentions the New Name of the Company.`),
+        VL('5.1.A.3', 'Declaration Letter', `With list of all products affected by this name change. Signed & stamped.`),
+        VL('5.1.A.4', 'Declaration Letter', `The proposed company trade name in English. Signed & stamped.`)
+      ]),
+      VG('5.1.B', 'B- For Imported, UL & Bulk FPP', [
+        VL('5.1.B.1', 'Fees: 1000 L.E.'),
+        VL('5.1.B.2', 'Declaration Letter from LH/MAH', `Stating that it is the same legal entity with no change in LH/MAH, product specifications, quality, composition, manufacturing site & process. Authenticated from Chamber of commerce or Notary & Egyptian consulate/embassy.`)
+      ])
+    ]),
+    VG('5.2', '5.2. Change in name of the Active Substance or of an excipient', [
+      VL('5.2.1', 'Fees: 1000 L.E.'),
+      VL('5.2.2', 'Old composition', `Signed and stamped.`),
+      VL('5.2.3', 'New composition', `Signed and stamped.`),
+      VL('5.2.4', 'Comparison table between old and new composition'),
+      VL('5.2.5', 'C.O.A of all suppliers of Active / inactive Ingredients'),
+      VL('5.2.6', 'Pharmacopeia Monograph active ingredient or reference for the name of inactive ingredient'),
+      VL('5.2.7', 'All updated relevant sections of the CTD part related to the new change')
+    ]),
+    VG('5.3', '5.3. Change in the name and/or address of: a manufacturer of the active substance / starting material, reagent or intermediate used in the manufacture of the active substance', [
+      VL('5.3.1', 'Fees: 1000 L.E.'),
+      VL('5.3.2', 'Recent API Manufacturer certificate with the new name', `Same address as mentioned in the old name certificate; submit one of: GMP; ISO 9001-2015 (for Minerals, Vitamins and Extracts only); CPP; written confirmation letter; in case of imported finished / bulk product, Quality module 3 (S-Part) 3.2.S.2.1 can be submitted if GMP is not available. If the new name certificate does not include the API: complete & recent API manufacturer license (or CPP for Korea) with the same new name certificate address & mentioning the API(s) name.`),
+      VL('5.3.3', 'API Manufacturer certificate with the old name', `Same address as mentioned in the new name certificate; submit one of: GMP; ISO 9001-2015 (for Minerals, Vitamins and Extracts only); CPP; written confirmation letter.`),
+      VL('5.3.4', 'In case of local API(s) manufacturer(s)', `Submit one of: API Manufacturer License issued from EDA mentioning the API production line; Data Certificate with API Manufacturer name issued from EDA mentioning the API production line.`),
+      VL('5.3.5', 'In case the new name GMP is not issued yet', `Declaration letter from the authority responsible for the manufacturer inspection declaring the name change without changing the manufacturing site (location).`),
+      VL('5.3.6', 'In case of different addresses between the old & new names API manufacturer(s) certificates without change in location', `Letter of authority responsible for the manufacturer inspection mentioning that the change in address is administrative; declaration letter from API manufacturer that API is supplied from old address if new extensions are not for API supply; layout for the API manufacturer clarifying its entrances, if the manufacturer has two entrances.`),
+      VL('5.3.7', 'All updated relevant sections of the CTD part related to the new change')
+    ]),
+    VG('5.4', '5.4. Deletion of manufacturing sites for an active substance, intermediate or finished product, packaging site, manufacturer responsible for Batch Releasing Site, Batch control Site, storage site', [
+      VG('5.4.a', '5.4.a. Deletion of manufacturing sites for an active substance', [
+        VL('5.4.a.1', 'Fees: 1000 L.E.'),
+        VL('5.4.a.2', 'For API manufacturer(s) that will be authorized for API manufacturing', `In case the address is not mentioned in any previous approvals and/or Marketing Authorization, submit one of: GMP; ISO 9001-2015 (Minerals, Vitamins and Extracts only); CPP; written confirmation letter. In addition to: invoices stating the API manufacturer address stamped from Directorate of Importation and customs release of pharmaceutical raw material, and/or importation approvals and/or production plans and/or withdrawal report with studies.`),
+        VL('5.4.a.3', 'For current local API manufacturer(s)', `Submit one of: API Manufacturer License issued from EDA mentioning the API production line; Data Certificate with API Manufacturer name issued from EDA mentioning the API production line.`),
+        VL('5.4.a.4', 'All updated relevant sections of the CTD part related to the new change')
+      ]),
+      VG('5.4.b', '5.4.b. Deletion of a Manufacturing / Packaging site / Batch Releasing Site', [
+        VG('5.4.b.A', 'A- For Local FPP', [
+          VL('5.4.b.A.1', 'Fees: 1000 L.E.'),
+          VL('5.4.b.A.2', 'Waiver OR Termination letter', `Waiver from old manufacturing/packaging site: mentioning the product name & reg. no., stating its approval of transferring manufacturing/packaging of the product to a new manufacturing site, authenticated from Bank & EDA Legal Affairs. OR Termination letter from LH to old manufacturing/packaging site, signed & stamped, with proof of delivery.`)
+        ]),
+        VG('5.4.b.B', 'B- (Imported / UL / Bulk Products)', [
+          VL('5.4.b.B.1', 'Fees: 1000 L.E.'),
+          VL('5.4.b.B.2', 'Letter of Variation', `From product LH in COO; product name, reg. no. mentioned; stating the required variation; authenticated from chamber of commerce, Egyptian embassy/consulate or Notary.`),
+          VL('5.4.b.B.3', 'For UL/Bulk FPP: Waiver OR Termination letter', `Waiver from old manufacturing/packaging site (product name & reg. no.; approval of transferring to a new site; authenticated from Bank & EDA Legal Affairs). OR Termination letter from LH to old site, signed & stamped, with proof of delivery.`)
+        ])
+      ])
+    ]),
+    VG('5.5', '5.5. Change in Name / Address of Manufacturing sites', [
+      VG('5.5.A', 'A- For Local FPP', [
+        VL('5.5.A.1', 'Fees: 1000 L.E.'),
+        VL('5.5.A.2', 'Last Updated Factory License', `Released from EDA, stating the New Name of the manufacturing site.`),
+        VL('5.5.A.3', 'Declaration Letter', `With list of all products affected by this name change. Signed & stamped.`)
+      ]),
+      VG('5.5.B', 'B- For Imported, UL & Bulk FPP', [
+        VL('5.5.B.1', 'Fees: 1000 L.E.'),
+        VL('5.5.B.2', 'No Change Declaration Letter', `From LH. Stating that there is NO change in the physical location of the manufacturing site, manufacturing process, quality & composition of the product. Authenticated from Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.5.B.3', 'Certificate of Good Manufacturing Practice (GMP) — NEW Name/Address', `For the site with the NEW name/address. Valid. Authenticated from Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.5.B.4', 'Certificate of Good Manufacturing Practice (GMP) — OLD Name/Address', `For the site with the OLD name/address. Authenticated from Chamber of commerce or Notary & Egyptian consulate/embassy (if applicable).`),
+        VL('5.5.B.5', 'Official document from a relevant official body', `In case of changing address, justifying the change in address.`)
+      ])
+    ]),
+    VG('5.6', '5.6. Change in Applicant for Registration (Imported, UL & Bulk FPP)', [
+      VL('5.6.1', 'Fees', `Imported FPP: transfer from Scientific Office to Company 6000 L.E.; from Company to Scientific Office 16000 L.E.; from Scientific Office to Scientific Office 11000 L.E. UL & Bulk FPP: 1000 L.E.`),
+      VL('5.6.2', 'Imported FPP — documents of the Scientific Office / Company', `Same documents as Section (4) item 5 (authorization letter and declaration letter for the Scientific Office; declaration letter for the Company profile code; N.B. separate fulfilled file for the Applicant change).`),
+      VL('5.6.3', 'Termination letter OR Waiver', `Termination letter from LH: product trade name & reg. no., name & address of old applicant, authenticated from chamber of commerce from country of origin & Egyptian consulate/embassy. OR Waiver from old applicant: product trade name & reg. no., authenticated from Bank.`),
+      VL('5.6.4', 'Authorization Letter OR Agency Agreement', `Authorization letter from LH: product trade name & reg. no., name & address of new applicant, clarifying its responsibilities for registration, all regulatory activities & signing contracts, authenticated from chamber of commerce from country of origin or Notary & Egyptian consulate/embassy. OR Agency Agreement between LH and New Applicant (same content, name & address as written in its commercial register).`),
+      VL('5.6.5', 'Commercial Register for Old Applicant OR Scientific Office License for old applicant', `Scientific Office License in case of scientific office.`),
+      VL('5.6.6', 'For UL FPP: Manufacturing contract', `Between New Applicant & Manufacturer. Authenticated from Chamber of Commerce, Egyptian Consulate/Embassy, EDA Legal Affairs and Bank.`),
+      VL('5.6.7', 'Attached Annex', `Mentioning the product name & reg. no.`)
+    ]),
+    VG('5.7', '5.7. Modification of Registration License', [
+      VL('5.7.1', 'Fees: 1000 L.E.'),
+      VL('5.7.2', 'EDA Approval', `Of the required change to be updated in the registration license, issued from relevant EDA department.`)
+    ]),
+    VG('5.8', '5.8. Finished product License Holder', [
+      VG('5.8.A', 'A- For Local FPP', [
+        VL('5.8.A.1', 'Fees: 5000 L.E.'),
+        VL('5.8.A.2', 'Ownership Waiver', `From Old LH to New LH. Authenticated from Real Estate Registry at Ministry of Justice and from EDA Legal Affairs. Product trade name, strength, dosage form & reg. no. mentioned.`),
+        VL('5.8.A.3', 'Manufacturing contract', `Between New LH & Manufacturing Site. Valid. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.8.A.4', 'Attached Annex of the contract', `The product trade name & reg. no. mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.8.A.5', '3 Copies Composition declaration', `On New LH head letter, identical to the one attached with the registration license or to the latest finally approved composition. Signed & stamped.`),
+        VL('5.8.A.6', 'Declaration Letter (Template 1)', `From Old LH. FPP does not have any other strengths of the same dosage form or other dosage forms either registered or under registered products. Signed & stamped.`),
+        VL('5.8.A.7', 'Declaration Letter (Template 2)', `From New LH. FPP does not have any other strengths of the same dosage form or other dosage forms either registered or under registered products. Signed & stamped.`),
+        VL('5.8.A.8', 'Declaration Letter (Template 3)', `Stating all registered & under-registrations human FPP with their active ingredients owned by the new License Holder. In case of Toll companies. Signed & stamped.`),
+        VL('5.8.A.9', 'Declaration Letter', `The new LH is committed to provide all safety data related to the product since its placement in market - when needed - in addition to implementing all its vigilance activities.`),
+        VL('5.8.A.10', '1st Marketing Permission Report', `For the products registered under the ministerial decree 425/2015 & 645/2018.`)
+      ]),
+      VG('5.8.B', 'B- For Imported / UL / Bulk Products', [
+        VL('5.8.B.1', 'Fees: 5000 L.E.'),
+        VL('5.8.B.2', 'Declaration Letter', `From New LH/MAH. Stating the ownership transfer. Ensuring that there is NO CHANGE in product composition, specification, manufacturing process and container/closure system. The product trade name & reg. no. is mentioned. Authenticated from Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.8.B.3', 'Authorization Letter', `From New LH to the current applicant. The product trade name & reg. no. mentioned. Name & address of applicant mentioned. Clarifying its responsibilities for registration & all regulatory activities. Authenticated from chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.8.B.4', 'For UL FPP: Manufacturing contract', `Between New LH/MAH & Manufacturer. Authenticated from Chamber of Commerce, Egyptian Consulate/Embassy, EDA Legal Affairs and Bank. If the contract is between the applicant & manufacturer: a letter from LH/MAH authorizing the applicant to sign contracts.`),
+        VL('5.8.B.5', 'For Bulk FPP: Packaging contract', `Between New LH/MAH & Packager. Authenticated from Chamber of Commerce, Egyptian Consulate/Embassy, EDA Legal Affairs and Bank. If the contract is between the applicant & packager: a letter from LH/MAH authorizing the applicant to sign contracts.`),
+        VL('5.8.B.6', 'Attached Annex', `Mentioning the product name & reg. no. Authenticated from Bank & EDA Legal Affairs.`)
+      ])
+    ]),
+    VG('5.9', '5.9. Addition / Change of FPP MAH in Egypt (Imported / UL / Bulk Products)', [
+      VL('5.9.1', 'Fees: 5000 L.E.'),
+      VL('5.9.2', 'Declaration Letter', `From LH in COO. Product name, reg. no. mentioned. Appointing the New MAH in Egypt clarifying its full responsibilities including but not limited to the right to sell the product in Egypt. Authenticated from Chamber of commerce & Egyptian consulate/embassy.`),
+      VL('5.9.3', 'Applicant Authorization Letter', `From New MAH in Egypt. Product name, reg. no. mentioned. Name & address of applicant mentioned matching with Commercial Register. Clarifying its responsibilities for registration & all regulatory activities. Authenticated from chamber of commerce & the Egyptian consulate/embassy.`),
+      VL('5.9.4', 'NO CHANGE Declaration Letter', `From New MAH in Egypt. Ensuring that there is NO CHANGE in product composition, specification, manufacturing process and container/closure system. Authenticated from chamber of commerce & the Egyptian consulate/embassy.`)
+    ]),
+    VG('5.10', '5.10. Addition / Change of Marketing Rights Holder of Finished Product (For Local Products)', [
+      VL('5.10.1', 'Fees: 5000 L.E. / Country'),
+      VL('5.10.2', 'Marketing Agreements', `Between New LH/MAH & Marketing Rights Holder. Valid. Authenticated from Bank & EDA Legal Affairs.`),
+      VL('5.10.3', 'Attached Annex', `Mentioning the product name & reg. no. Authenticated from Bank & EDA Legal Affairs.`)
+    ]),
+    VG('5.11', '5.11. Change / addition Solvent / Diluent manufacturer supplied for a FPP (Local / UL Products)', [
+      VL('5.11.1', 'Fees: 1000 L.E.'),
+      VL('5.11.2', 'EDA Valid Registration License of solvent', `If Final & invalid: approval for registration renewal. If Tentative & invalid: license validity extension approval or approval for submission from Tent. to final.`),
+      VL('5.11.3', 'In case of Lidocaine Addition / Change', `Composition of Lidocaine from the old and new supplier. Previously approved stability study and AR for the old lidocaine supplier.`),
+      VL('5.11.4', 'Declaration Letter', `Of the pack type of solvent from the OLD supplier.`),
+      VL('5.11.5', 'For UL FPP: Letter of Variation', `From product LH in COO. Stating the required variation. Authenticated from chamber of commerce, Egyptian embassy/consulate or Notary.`)
+    ]),
+    VG('5.12', '5.12. Addition / Change in the manufacturer', [
+      VL('5.12.F', 'Fees: 1000 L.E.'),
+      VG('5.12.A', 'A. Addition or replacement of a new manufacturer for intermediate / starting material', [
+        VL('5.12.A.1', 'Commitment from API manufacturer', `Where applicable, that the starting material specifications and analytical procedures and the active substance & intermediate (used in the manufacturing process of the active substance) synthetic route, quality control procedures and specifications are the same as those already approved.`),
+        VL('5.12.A.2', 'Commitment of the active substance manufacturer', `Where relevant, to inform the marketing authorization holder of any changes to the manufacturing process, specifications and analytical procedures of the active substance.`),
+        VL('5.12.A.3', 'All updated relevant sections of the CTD part related to the new change')
+      ]),
+      VG('5.12.B', 'B. Change in manufacturer of the active substance', [
+        VG('5.12.B.1', 'B.1. Addition or replacement of a new manufacturer for API', [
+          VL('5.12.B.1.1', 'For API manufacturer(s) to be added', `Submit one of: GMP; ISO 9001-2015 (Minerals, Vitamins and Extracts only); CPP; written confirmation letter. N.B.: the certificate must be complete, recent, mentioning the API manufacturer name & address and the API(s) name(s). If it does not mention the API name(s): complete, recent API manufacturer license (or CPP for Korea) with the same address of the GMP certificate & mentioning the API(s) name.`),
+          VL('5.12.B.1.2', 'For the current API manufacturer(s)', `Submit one of: GMP; ISO 9001-2015 (Minerals, Vitamins and Extracts only); CPP; written confirmation letter. N.B.: the certificate must mention the API manufacturer name & its address.`),
+          VL('5.12.B.1.3', 'In case of local API manufacturer(s)', `For current & to-be-added manufacturer(s), submit one of: API Manufacturer License issued from EDA mentioning the API production line; Data Certificate with API Manufacturer name issued from EDA mentioning the API production line.`),
+          VL('5.12.B.1.4', 'API manufacturer(s) CoA(s)', `Same specification as the API in the Product Registration License Composition; matching the API monograph in all tests and specification limit ranges; mentioning the expiry or re-test date. Particle size test range in numbers & solubility test are required if the API particle size will be changed or is clarified in the Product Registration License Composition.`),
+          VL('5.12.B.1.5', 'Relationship Declaration Letter', `Required in case the submitted CoA on manufacturer letterhead is different from the API manufacturer — between the two manufacturers.`),
+          VL('5.12.B.1.6', 'Updated Pharmacopoeia Monograph for API(s)'),
+          VL('5.12.B.1.7', 'In case API is Pellets / Premix / Granules', `Composition on API manufacturer letterhead & matching with Product Registration License Composition.`),
+          VL('5.12.B.1.8', 'In case of Pellets specification is not In-house', `Justification on API manufacturer letterhead.`),
+          VL('5.12.B.1.9', 'All updated relevant sections of the CTD part related to the new change')
+        ]),
+        VG('5.12.B.2', 'B.2. Changes to quality control testing arrangements for the active substance — replacement or addition of a site where batch control / testing takes place', [
+          VL('5.12.B.2.1', 'Amendment of the relevant section(s) of the dossier'),
+          VL('5.12.B.2.2', 'Valid proof that the proposed site is GMP compliant for the testing operations'),
+          VL('5.12.B.2.3', 'Certificate of analysis')
+        ]),
+        VG('5.12.B.3', 'B.3. Addition or replacement of a new site of micronization of the active substance', [
+          VL('5.12.B.3.1', 'Amendment of the relevant section(s) of the dossier'),
+          VL('5.12.B.3.2', 'Certificate of analysis'),
+          VCTD('5.12.B.3.3')
+        ])
+      ])
+    ]),
+    VG('5.13', '5.13. Changes in the manufacturing process of the active substance', [
+      VF('5.13.1'), VAM('5.13.2'),
+      VL('5.13.3', 'Certificate of analysis'),
+      VL('5.13.4', 'Copy of approved specifications of the active substance'),
+      VCTD('5.13.5')
+    ]),
+    VG('5.14', '5.14. Change in batch size of active substance', [
+      VF('5.14.1'), VAM('5.14.2'),
+      VL('5.14.3', 'Certificate of analysis'),
+      VCTD('5.14.4')
+    ]),
+    VG('5.15', '5.15. Change to in-process tests or limits applied during the manufacture of the active substance', [
+      VF('5.15.1'), VAM('5.15.2'),
+      VL('5.15.3', 'Comparative table of current & proposed in-process control & limits'),
+      VL('5.15.4', 'Details of any new non-pharmacopoeial analytical method and validation data, where relevant'),
+      VL('5.15.5', 'Certificate of analysis'),
+      VL('5.15.6', 'Justification from the API manufacturer', `As appropriate, for the new in-process control and limits.`),
+      VCTD('5.15.7')
+    ]),
+    VG('5.16', '5.16. Change in the specification parameters and/or limits of an active substance', [
+      VF('5.16.1'), VAM('5.16.2'),
+      VL('5.16.3', 'COAs for current and proposed changes'),
+      VL('5.16.4', 'Comparative table of current & proposed specifications'),
+      VL('5.16.5', 'Justification from the API manufacturer', `As appropriate, of the new specification attribute and the acceptance criteria.`),
+      VL('5.16.6', 'Details of any new analytical procedure and validation data, where relevant'),
+      VCTD('5.16.7')
+    ]),
+    VG('5.17', '5.17. Change to analytical procedure for active substance', [
+      VF('5.17.1'),
+      VL('5.17.2', 'Amendment of the relevant section(s) of the dossier', `Including a description of the analytical methodology, a summary of validation data, revised specifications.`),
+      VL('5.17.3', 'Comparative validation results', `Or, if justified, comparative analysis results showing that the current analytical procedure and the proposed one are equivalent. This requirement is not applicable in case of an addition of a new analytical procedure unless the new analytical procedure is added as an alternative procedure to a current one.`),
+      VCTD('5.17.4')
+    ]),
+    VG('5.18', '5.18. Change in immediate packaging of the active Substance', [
+      VF('5.18.1'), VAM('5.18.2'),
+      VL('5.18.3', 'Comparison between current & proposed immediate packaging specifications of active substance', `If applicable.`),
+      VL('5.18.4', 'Results of stability study of a new immediate packaging material from API manufacturer'),
+      VCTD('5.18.5')
+    ]),
+    VG('5.19', '5.19. Change in specification or acceptance criteria of immediate packaging of the active Substance', [
+      VF('5.19.1'), VAM('5.19.2'),
+      VL('5.19.3', 'Comparative table current & proposed specifications of immediate packaging of active substance'),
+      VL('5.19.4', 'Justification from the API manufacturer', `As appropriate, of the new specification attribute and the acceptance criteria.`),
+      VCTD('5.19.5')
+    ]),
+    VG('5.20', '5.20. Change in analytical procedure for immediate packaging of the active Substance', [
+      VF('5.20.1'),
+      VL('5.20.2', 'Amendment of the relevant section(s) of the dossier', `Including a description of the analytical methodology, a summary of validation data.`),
+      VL('5.20.3', 'Comparative validation results', `Or, if justified, comparative analysis results showing that the current analytical procedure and the proposed one are equivalent. This requirement is not applicable in case of an addition of a new analytical procedure.`),
+      VCTD('5.20.4')
+    ]),
+    VG('5.21', '5.21. Change in the retest period / storage period or storage conditions of the active substance', [
+      VF('5.21.F'),
+      VG('5.21.a', 'a) Retest period / storage period', [
+        VG('5.21.a.1', '1. Reduction', [
+          VAM('5.21.a.1.1'),
+          VL('5.21.a.1.2', 'Results of stability study of API manufacturer for proposed'),
+          VL('5.21.a.1.3', 'Justification for proposed'),
+          VL('5.21.a.1.4', 'Copy of approved specifications for proposed'),
+          VCTD('5.21.a.1.5')
+        ]),
+        VG('5.21.a.2', '2. Extension or introduction of a retest period / storage period supported by real time data', [
+          VL('5.21.a.2.1', 'Comparison between current & proposed changes'),
+          VL('5.21.a.2.2', 'Results of stability study from API Manufacturer'),
+          VCTD('5.21.a.2.3')
+        ])
+      ]),
+      VG('5.21.b', 'b) Storage conditions', [
+        VF('5.21.b.1'), VAM('5.21.b.2'),
+        VL('5.21.b.3', 'Results of stability study from API Manufacturer'),
+        VL('5.21.b.4', 'Justification for proposed'),
+        VL('5.21.b.5', 'Copy of approved specifications of the active substance'),
+        VCTD('5.21.b.6')
+      ]),
+      VG('5.21.c', 'c) Change to approved Stability Protocol', [
+        VF('5.21.c.1'), VAM('5.21.c.2'),
+        VL('5.21.c.3', 'Copy of approved specifications of active substance'),
+        VCTD('5.21.c.4')
+      ])
+    ]),
+    VG('5.22', '5.22. Submission of a new or updated Ph. Eur. certificate of suitability or deletion of Ph. Eur. certificate of suitability for an active substance', [
+      VF('5.22.F'),
+      VL('5.22.a', 'a. New certificate from an approved manufacturer'),
+      VG('5.22.b', 'b. Updated certificate from an already approved manufacturer', [
+        VAM('5.22.b.1'),
+        VL('5.22.b.2', 'Comparison between current & proposed changes'),
+        VL('5.22.b.3', 'Copy of the current and/or updated Ph. Eur. certificate of suitability (CEP) and the letter of access', `Where available.`),
+        VCTD('5.22.b.4')
+      ]),
+      VG('5.22.c', 'c. New certificate for a non-sterile active substance that is to be used in a sterile medicinal product, where water is used in the last steps of the synthesis and the material is not claimed to be endotoxin free', [
+        VAM('5.22.c.1'),
+        VL('5.22.c.2', 'Comparison between current & proposed changes'),
+        VL('5.22.c.3', 'Copy of the current and/or updated Ph. Eur. certificate of suitability (CEP) and the letter of access', `Where available.`),
+        VL('5.22.c.4', 'Copy of the CEP and the letter of access + evidence on water / endotoxins', `Copy of the current and/or updated CEP and the letter of access (where available). Suitable evidence to confirm compliance of either the water used in the final steps of the synthesis of the active substance, or the active substance itself, with the corresponding requirements of the guideline on quality of water for pharmaceutical use regarding bacterial endotoxins and microbiological quality.`),
+        VCTD('5.22.c.5')
+      ])
+    ], `Note printed after this section in the notice: in case the current API manufacturer address is not mentioned, invoices stamped from Directorate of Importation and customs release of pharmaceutical raw material / importation approvals / production plans / withdrawal / studies are required to be submitted.`),
+    VG('5.23', '5.23. Change or addition of imprints, bossing (embossing/debossing) or other markings including replacement, or addition of inks used for product marking', [
+      VF('5.23.1'),
+      VL('5.23.2', 'Old composition', `"Signed and stamped". (If needed)`),
+      VL('5.23.3', 'New composition', `"Signed and stamped". (If needed)`),
+      VL('5.23.4', 'Safety Data Sheet for Ink including composition of ink', `In case of change or addition of imprints.`),
+      VL('5.23.5', 'Reference for scoring', `In case of change or addition of scoring / break lines on tablets.`),
+      VL('5.23.6', 'Commitment to be written in pamphlet and on outer pack, reference of Innovator and its leaflet', `In case of addition of Non-Functional Scoring / break lines.`),
+      VL('5.23.7', 'Commitment that change does not affect the stability of the product'),
+      VCTD('5.23.8')
+    ]),
+    VG('5.24', '5.24. Change in the shape or dimensions of the pharmaceutical form', [
+      VF('5.24.1'),
+      VL('5.24.2', 'Sample', `(If needed).`),
+      VL('5.24.3', 'Old & New Certificate of Analysis'),
+      VL('5.24.4', 'Old & New finished pharmaceutical product specifications'),
+      VL('5.24.5', 'Commitment that change does not affect the stability of the product'),
+      VCTD('5.24.6')
+    ]),
+    VG('5.25', '5.25. Changes in the composition (excipients) of the finished pharmaceutical product', [
+      VF('5.25.1'),
+      VL('5.25.2', 'Old composition', `"Signed and stamped".`),
+      VL('5.25.3', 'New composition', `"Signed and stamped".`),
+      VL('5.25.4', 'Comparison table between old and new composition'),
+      VL('5.25.5', 'In case of hard gelatin capsule: capsule shell composition on supplier paper'),
+      VL('5.25.6', 'In case of clarification of capsule shell composition', `A report from Inspection Department stating the capsule shell composition including batch record, if not documented in any previous approvals.`),
+      VL('5.25.7', 'In case of coating blends', `E.g. Opadry / Eudragit / Kollicoat / Flavors on supplier paper / Ink — submit composition and COA of supplier.`),
+      VL('5.25.8', 'Scientific justification & reference', `Write in composition the cause of addition (e.g. for manufacturing loss) — in case of elimination, reduction or addition of an overage (flow chart needed in case of overage).`),
+      VL('5.25.9', 'C.O.A & Composition of all suppliers of Active Ingredient or Premixes'),
+      VL('5.25.10', 'Calculations of pellets / Premix on applicant paper head'),
+      VL('5.25.11', 'In case of change of salt equivalence and/or crystalline state of the drug substance', `Refer to section 5.11 (as printed in the notice).`),
+      VL('5.25.12', 'Scientific reference for finished pharmaceutical product pH', `In case of change of pH range.`),
+      VL('5.25.13', 'Calculation of approved limit', `In case of presence of methyl paraben and propyl paraben in oral liquid dosage forms (suspension and syrup).`),
+      VCTD('5.25.14')
+    ]),
+    VG('5.26', '5.26. Change in coating weight of oral dosage forms or change in weight of capsule shell', [
+      VF('5.26.1'),
+      VL('5.26.2', 'Old composition', `"Signed and stamped".`),
+      VL('5.26.3', 'New composition', `"Signed and stamped".`),
+      VL('5.26.4', 'Comparison table between old and new composition'),
+      VL('5.26.5', 'In case of hard gelatin capsule: capsule shell composition on supplier paper'),
+      VL('5.26.6', 'In case of coating blends', `E.g. Opadry / Eudragit / Kollicoat / Flavors on supplier paper / Ink — submit composition and COA of supplier.`),
+      VL('5.26.7', 'Scientific justification & reference', `Write in composition the cause of addition (e.g. for manufacturing loss) — in case of elimination, reduction or addition of an overage.`),
+      VL('5.26.8', 'Commitment that finished pharmaceutical product specification has only been updated in respect of weight and dimensions'),
+      VCTD('5.26.9')
+    ]),
+    VG('5.27', '5.27. Change in the manufacturing site for part or all of the manufacturing process of the finished product', [
+      VG('5.27.1', '5.27.1. Replacement of a Manufacturing / Packaging Site (Local / UL Products)', [
+        VL('5.27.1.1', 'Fees', `1st site: 3000 L.E.; 2nd site: 5000 L.E.; 3rd site: 10000 L.E.; 4th site: 20000 L.E. N.B.: for transferring the storage site refer to the fees of storage site transfer.`),
+        VL('5.27.1.2', 'Waiver OR Termination letter', `Waiver from old manufacturing/packaging site: mentioning the product name & reg. no., stating his approval of transferring manufacturing/packaging of the product to a new manufacturing site, authenticated from Bank & EDA Legal Affairs. OR Termination letter from LH to old manufacturing/packaging site, signed & stamped, with proof of delivery.`),
+        VL('5.27.1.3', 'Manufacturing / Packaging contract', `Between LH/Applicant & new manufacturer/packager. Valid. Authenticated from Bank & EDA Legal Affairs. If the contract is between the applicant & manufacturing/packaging site: a letter from LH/MAH authorizing the applicant to sign contracts, authenticated from chamber of commerce or Notary & Egyptian embassy/consulate.`),
+        VL('5.27.1.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.27.1.5', 'Last Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.27.1.6', 'Last Updated Commercial Register of the new manufacturing site'),
+        VL('5.27.1.7', 'If the site was previously temporarily added', `Copy of the previous approval. Copies of all studies & analysis approvals done for this site.`),
+        VL('5.27.1.8', 'For UL FPP: Letter of Variation', `From product LH in COO. Stating the required variation. Authenticated from chamber of commerce, Egyptian embassy/consulate or Notary.`),
+        VL('5.27.1.9', 'For Toll Companies: Toll Card / Annex', `Last valid updated Toll Card / Annex including the requested manufacturing/packaging site.`)
+      ]),
+      VG('5.27.2', '5.27.2. Addition of a Manufacturing / Packaging site (Local / UL Products)', [
+        VL('5.27.2.1', 'Fees', `2nd site: 5000 L.E.; 3rd site: 10000 L.E.; 4th site: 20000 L.E. N.B.: for addition of the storage site refer to the fees of storage site addition.`),
+        VL('5.27.2.2', 'Declaration Letter from old site OR Declaration Letter (Template 4)', `Declaration Letter from old manufacturing/packaging site: product trade name & reg. no. mentioned, stating his approval of adding a new manufacturing site, authenticated from Bank & EDA Legal Affairs. OR Declaration Letter (Template 4) from the LH: product trade name & reg. no. mentioned; stating "The company takes the full legal responsibility for adding a new site without any responsibility on EDA, regarding the obligations and duties imposed under the manufacturing contract with the old factory (factories)"; name of old factories is mentioned; authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.27.2.3', 'Manufacturing / Packaging contract', `Between LH/Applicant & new manufacturer/packager. Valid. Authenticated from Bank & EDA Legal Affairs. If the contract is between the applicant & manufacturing/packaging site: a letter from LH/MAH authorizing the applicant to sign contracts, authenticated from chamber of commerce or Notary & Egyptian embassy/consulate.`),
+        VL('5.27.2.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.27.2.5', 'Last Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.27.2.6', 'Last Updated Commercial Register of the new manufacturing site'),
+        VL('5.27.2.7', 'In case of Tentative registration license', `AR approval of the 1st production batch from CADC.`),
+        VL('5.27.2.8', 'If the site was previously temporarily added', `Copy of the previous approval. Copies of all studies & analysis approvals done for this site.`),
+        VL('5.27.2.9', 'For UL FPP: Letter of Variation', `From product LH in COO. Stating the required variation. Authenticated from chamber of commerce or Notary & Egyptian embassy/consulate.`),
+        VL('5.27.2.10', 'For Toll Companies: Toll Card / Annex', `Last valid updated Toll Card / Annex including the requested manufacturing/packaging site.`)
+      ]),
+      VG('5.27.3', '5.27.3. Replacement or addition of a Manufacturing / Packaging / Batch Releasing Site (Imported / UL / Bulk Products)', [
+        VL('5.27.3.1', 'Fees', `1st site change: 3000 L.E.; 2nd site addition/change: 5000 L.E.; 3rd: 10000 L.E.; 4th: 20000 L.E.`),
+        VL('5.27.3.2', 'Letter of Variation', `From product LH in COO. Product name, reg. no. mentioned. Stating the required variation. Authenticated from chamber of commerce, Egyptian embassy/consulate or Notary. ** In case the variation is not mentioned in the CPP of the product (for packaging / batch releasing site).`),
+        VL('5.27.3.3', 'Certificate of Good Manufacturing Practice (GMP)', `For the new site. Valid. Authenticated from Chamber of commerce & Egyptian consulate/embassy or Notary.`),
+        VL('5.27.3.4', 'If the new site is located in a Non-reference country: CPP from Reference country', `Valid. Product registered & marketed. Where the proposed site is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`)
+      ]),
+      VG('5.27.4', '5.27.4. Replacement or addition of a Storage Site', [
+        VL('5.27.4.1', 'Fees: 1000 L.E.'),
+        VL('5.27.4.2', 'Storage site License'),
+        VL('5.27.4.3', 'For Local FPP: Storage contract', `Between LH & storage site. Valid. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.27.4.4', 'For imported FPP: Importer Register License + Declaration Letter', `Importer Register License (stating the name of storage site). Declaration Letter from license holder stating the importer of the product (if required).`),
+        VL('5.27.4.5', 'For Bulk / UL FPP: Storage contract', `Between LH/Applicant & storage site. Valid. Authenticated from Bank & EDA Legal Affairs. If the contract is between the applicant & storage site: a letter from LH/MAH authorizing the applicant to sign contracts, authenticated from chamber of commerce or Notary & Egyptian embassy/consulate.`),
+        VL('5.27.4.6', 'For Toll Companies: Toll Card / Annex', `Last valid updated Toll Card / Annex including the requested storage site.`)
+      ])
+    ]),
+    VG('5.28', '5.28. Change in the manufacturing process of the finished product, including an intermediate used in the manufacture of the finished product', [
+      VF('5.28.1'),
+      VL('5.28.2', 'Comparison between current & proposed process', `On the manufacturer letter head (signed & stamped).`),
+      VL('5.28.3', 'EDA Inspection Report (Local & UL Products) / Letter of Variation (UL / Imported Products)', `Local & UL products — EDA Inspection Report stating: currently approved manufacturing process & mentioning the proposed manufacturing process of the finished product (with attached flow chart of the current/proposed manufacturing process); clarifying if this change will be accompanied by changes in qualitative and quantitative impurity profile or in physico-chemical properties; signed & stamped from EDA inspector. UL / Imported products — Letter of Variation from License Holder stating the change, authenticated from Chamber of Commerce, Egyptian Consulate/Embassy.`),
+      VL('5.28.4', 'Declaration Letter', `That the changes to process parameter(s) have no impact on the quality of the finished product.`)
+    ]),
+    VG('5.29', '5.29. Change in the batch size of the finished product — scaling up or down of FPP production batch size (Local / UL / Imported Products)', [
+      VF('5.29.1'),
+      VL('5.29.2', 'For Local & UL Products: EDA Inspection Report', `Stating the batch size of the 1st production batch in addition to the currently approved batch size & mentioning the proposed batch size. Clarifying if this change will be accompanied by changes in the manufacturing process or equipment. Signed & stamped from EDA inspector.`),
+      VL('5.29.3', 'For UL & Imported Products: Letter of Variation', `From product LH in COO. Stating the required variation.`),
+      VL('5.29.4', 'Declaration Letter — marketing reasons only', `Stating that "This change is for marketing reasons only with NO change in quality, manufacture and stability of the product".`),
+      VL('5.29.5', 'Declaration Letter — no previous batch size approval', `Stating that "The company didn't get a previous approval for batch size change for this product". In case of a previous approval, state number and date of the approval and attach it with the file.`),
+      VL('5.29.6', 'Declaration Letter — manufacturing process', `Stating that "There is YES/No change in the manufacturing process". In case of YES: comparison between old & new manufacturing process.`),
+      VL('5.29.7', 'Declaration Letter — manufacturing equipment', `Stating that "There is YES/No change in the manufacturing equipment except only those necessitated by the change in batch size (e.g. use of different sized equipment with same design & operating principle)". In case of YES: declaration letter stating the comparison between the old & new manufacturing equipment.`),
+      VL('5.29.8', 'If the new registration license is registered according to 425 or 645 (change/addition of batch size)', `Please clarify if the change is related to the first three production batches manufactured or no.`)
+    ]),
+    VG('5.30', '5.30. Change to in-process tests or limits applied during the manufacture of the finished product', [
+      VF('5.30.1'),
+      VL('5.30.2', 'Comparative table of current and proposed in-process control and limits'),
+      VL('5.30.3', 'Details of any new analytical procedure and validation data, where relevant'),
+      VL('5.30.4', 'Justification / risk assessment', `Showing that the in-process control is non-significant or that it is obsolete.`),
+      VL('5.30.5', 'Justification of the new in-process control and limits'),
+      VL('5.30.6', 'Comparative study results', `Or comparative analysis results showing that the current analytical procedure and the proposed one are equivalent. Not applicable in case of an addition of a new analytical procedure.`),
+      VCTD('5.30.7')
+    ]),
+    VG('5.31', '5.31. Change in the specification attribute and/or acceptance criteria of an excipient', [
+      VF('5.31.1'),
+      VL('5.31.2', 'Comparative table of current and proposed specifications'),
+      VL('5.31.3', 'Details of any new analytical procedure and validation data, where relevant'),
+      VL('5.31.4', 'Batch analysis data on two production batches of the excipient', `For all specification attributes [3 production batches (unless otherwise justified) for biological excipients or novel excipients].`),
+      VL('5.31.5', 'Justification for not submitting a new bioequivalence study', `According to the relevant Guideline on the Investigation of Bioequivalence, if appropriate.`),
+      VL('5.31.6', 'Justification / risk assessment', `Showing that the attribute is non-significant or that it is obsolete.`),
+      VL('5.31.7', 'Justification of the new specification attribute and the acceptance criteria'),
+      VCTD('5.31.8')
+    ]),
+    VG('5.32', '5.32. Change in the specification attribute and/or limits of the Finished Pharmaceutical product', [
+      VF('5.32.1'),
+      VL('5.32.2', 'Old finished pharmaceutical product specifications', `"Signed and stamped".`),
+      VL('5.32.3', 'New finished pharmaceutical product specifications', `"Signed and stamped".`),
+      VL('5.32.4', 'Comparative table of current and proposed specifications'),
+      VL('5.32.5', 'Scientific justification & reference for the requested change'),
+      VL('5.32.6', 'Pharmacopoeia Monograph'),
+      VCTD('5.32.7')
+    ]),
+    VG('5.33', '5.33. Change in test (Analytical) procedure for the Finished Pharmaceutical product', [
+      VF('5.33.1'),
+      VL('5.33.2', 'Notification / Approved CoA from CADC with proposed change'),
+      VCTD('5.33.3')
+    ]),
+    VG('5.34', '5.34. Change in immediate packaging of the finished product', [
+      VF('5.34.1'),
+      VL('5.34.2', 'COAs of Old Packs', `Containing full detailed description for type of pack, its capacity and liner.`),
+      VL('5.34.3', 'COAs of New Packs from suppliers', `Containing full detailed description for type of pack, its capacity and liner.`),
+      VL('5.34.4', 'Comparative table of the current and proposed immediate packaging specifications', `If applicable.`),
+      VL('5.34.5', 'Sample'),
+      VL('5.34.6', 'In case of presence of desiccant: COA of desiccant supplier'),
+      VCTD('5.34.7')
+    ]),
+    VG('5.35', '5.35. Change in the specification attribute and/or acceptance criteria of the immediate packaging of the finished product', [
+      VF('5.35.1'),
+      VL('5.35.2', 'Comparative table of current and proposed specifications'),
+      VL('5.35.3', 'Details of any new analytical procedure and validation data, where relevant'),
+      VL('5.35.4', 'Justification / risk assessment', `Showing that the parameter is non-significant or that it is obsolete.`),
+      VL('5.35.5', 'Justification of the new specification attribute and the acceptance criteria'),
+      VCTD('5.35.6')
+    ]),
+    VG('5.36', '5.36. Change in analytical procedure for the immediate packaging of the finished product', [
+      VF('5.36.1'),
+      VL('5.36.2', 'Comparative table of current and proposed analytical procedure', `If applicable.`),
+      VL('5.36.3', 'Comparative validation results', `Or, if justified, comparative analysis results showing that the current analytical procedure and the proposed one are equivalent. This requirement is not applicable in case of an addition of a new analytical procedure.`),
+      VL('5.36.4', 'Description of the analytical methodology, a summary of validation data'),
+      VCTD('5.36.5')
+    ]),
+    VG('5.37', '5.37. Change in shape of the container', [
+      VF('5.37.1'), VCOAO('5.37.2'), VCOAN('5.37.3'), VSMP('5.37.4'),
+      VL('5.37.5', 'Reference for new shape'),
+      VCTD('5.37.6')
+    ]),
+    VG('5.38', '5.38. Change in pack size of the finished product', [
+      VF('5.38.1'), VCOAO('5.38.2'), VCOAN('5.38.3'), VSMP('5.38.4'),
+      VL('5.38.5', 'Reference for new pack size'),
+      VCTD('5.38.6')
+    ]),
+    VG('5.39', '5.39. Change in any part of the primary packaging not in direct contact with the finished product formulation', [
+      VF('5.39.1'), VCOAO('5.39.2'), VCOAN('5.39.3'), VSMP('5.39.4'),
+      VL('5.39.5', 'Reference for new pack', `Related to change / addition accessory.`),
+      VCTD('5.39.6')
+    ]),
+    VG('5.40', '5.40. Change in manufacturer, sterilization process or supplier of packaging components (when mentioned in the dossier)', [
+      VF('5.40.1'),
+      VL('5.40.2', 'Comparative table of current and proposed specifications', `If applicable.`),
+      VL('5.40.3', 'Description of the sterilization method and sterilization cycle', `Validation of the sterilization cycle should be provided if the sterilization cycle does not use the reference conditions stated in the Ph. Eur.`),
+      VL('5.40.4', 'Evidence that the sterilization has been conducted and validated', `In accordance with GMP and/or relevant ISO standards, as per guideline on the sterilization of the medicinal product, active substance, excipient and primary container.`),
+      VCTD('5.40.5')
+    ]),
+    VG('5.41', '5.41. Change of a secondary packaging component of the finished product (including replacement or addition or deletion), when mentioned in the dossier', [
+      VF('5.41.1'), VCTD('5.41.2')
+    ]),
+    VG('5.42', '5.42. Change in the shelf-life or storage conditions of the Finished Pharmaceutical product', [
+      VG('5.42.a', 'a. Reduction of the shelf life', [
+        VF('5.42.a.1'),
+        VL('5.42.a.2', 'Reference of Innovator'),
+        VL('5.42.a.3', 'Scientific Justification for this Reduction'),
+        VL('5.42.a.4', 'Any stability studies or documents for new shelf life', `That clarify the need of reduction of shelf life must be submitted.`),
+        VL('5.42.a.5', 'In case of Imported or Under license files: Declaration Letter', `From LH/MAH in COO, signed and stamped: stating reasons of reduction.`),
+        VCTD('5.42.a.6')
+      ]),
+      VG('5.42.b', 'b. Extension of the shelf life', [
+        VF('5.42.b.1'),
+        VL('5.42.b.2', 'Stability study approval'),
+        VCTD('5.42.b.3')
+      ]),
+      VG('5.42.c', 'c. Change in storage conditions of the Finished Pharmaceutical product or the diluted / reconstituted product', [
+        VF('5.42.c.1'),
+        VL('5.42.c.2', 'Stability study approval'),
+        VCTD('5.42.c.3')
+      ])
+    ])
+  ]),
+  VG('IV', 'IV) Additional human pharmaceutical variations Not reportable in Sixth edition guidelines', [
+    VG('5.43', '5.43. Change Reg. Type of Finished product', [
+      VG('5.43.1', '5.43.1. Change Reg. Type from Imported Finished to Imported Bulk', [
+        VFR('5.43.1.1'),
+        VL('5.43.1.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of Packaging site of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.1.3', 'Packaging contract', `Between LH/Applicant & New Packager. A letter from LH/MAH authorizing the applicant to sign contracts. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce or Notary & Egyptian embassy/consulate is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.1.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.1.5', 'Last Updated Packaging site license', `Area needed for packaging the product is present.`),
+        VL('5.43.1.6', 'Last Updated Commercial Register', `Of the new packaging site.`),
+        VL('5.43.1.7', 'Storage contract', `Between LH/Applicant & Storage site. Valid. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce or Notary & Egyptian embassy/consulate is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.1.8', 'Storage Site License')
+      ]),
+      VG('5.43.2', '5.43.2. Change Reg. Type from Imported Finished to UL', [
+        VFR('5.43.2.1'),
+        VL('5.43.2.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of Bulk Manufacturing Site of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.2.3', 'Manufacturing Contract', `Between LH/Applicant & New manufacturer. A letter from LH/MAH authorizing the applicant to sign contracts. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce or Notary & Egyptian embassy/consulate is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.2.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.2.5', 'Last Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.43.2.6', 'Last Updated Commercial Register (New Manufacturer)'),
+        VL('5.43.2.7', 'Storage contract', `Between LH/Applicant & Storage site. Valid. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce or Notary & Egyptian embassy/consulate is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.2.8', 'Submission of API supplier addition request', `Refer to API supplier addition checklist.`)
+      ]),
+      VG('5.43.3', '5.43.3. Change Reg. Type from Imported Finished to Local', [
+        VFR('5.43.3.1'),
+        VL('5.43.3.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of ownership of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.3.3', 'In case of Toll Manufacturing: Manufacturing contract', `Between New LH & New manufacturer/packager. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.3.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.3.5', 'Last Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.43.3.6', 'Last Updated Commercial Register (New Manufacturer)'),
+        VL('5.43.3.7', 'Storage contract', `Between New LH & Storage site. Valid. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.3.8', 'Storage Site License'),
+        VL('5.43.3.9', '3 Copies Composition declaration', `On New LH paper. Signed & stamped. Identical to the one attached with the registration license or to the latest finally approved composition.`),
+        VL('5.43.3.10', 'Submission of API supplier addition request', `Refer to API supplier addition checklist.`)
+      ]),
+      VG('5.43.4', '5.43.4. Change Reg. Type from UL to Imported Finished', [
+        VFR('5.43.4.1'),
+        VL('5.43.4.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of Bulk MFG Site of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.4.3', 'Certificate of Good Manufacturing Practice (GMP)', `For new manufacturing site. Valid & authenticated from Chamber of Commerce or Notary & Egyptian Consulate/Embassy.`),
+        VL('5.43.4.4', 'Manufacturing Waiver', `From old manufacturer. The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.4.5', 'Last Updated Importer Record', `Stating name of storage site and product name.`)
+      ]),
+      VG('5.43.5', '5.43.5. Change Reg. Type from UL to Imported Bulk', [
+        VFR('5.43.5.1'),
+        VL('5.43.5.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of Bulk Manufacturing Site of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.5.3', 'Certificate of Good Manufacturing Practice (GMP)', `For new manufacturing site. Valid. Authenticated from Chamber of Commerce or Notary & Egyptian Consulate/Embassy.`),
+        VL('5.43.5.4', 'Manufacturing Waiver', `From old manufacturer. The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.5.5', 'Packaging contract (In case of changing packaging site)', `Between LH/Applicant & New Packager. A letter from LH/MAH authorizing the applicant to sign contracts. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce or Notary & Egyptian embassy/consulate is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.5.6', 'Last Updated Importer Record')
+      ]),
+      VG('5.43.6', '5.43.6. Change Reg. Type from UL to Local', [
+        VFR('5.43.6.1'),
+        VL('5.43.6.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of ownership of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.6.3', 'Manufacturing Waiver', `From old manufacturer (in case of changing MFG site). The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.6.4', 'In case of Toll Manufacturing: Manufacturing contract', `Between LH & New manufacturer/packager. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.6.5', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.6.6', 'Last Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.43.6.7', 'Storage contract', `Between LH/Applicant & Storage site. Valid. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.6.8', 'Storage Site License'),
+        VL('5.43.6.9', '3 Copies Composition declaration', `On New LH letterhead. Signed & stamped. Identical to the one attached with the registration license or to the latest finally approved composition.`)
+      ]),
+      VG('5.43.7', '5.43.7. Change Reg. Type from Imported Bulk to Imported Finished', [
+        VFR('5.43.7.1'),
+        VL('5.43.7.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of Packaging site of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.7.3', 'Waiver', `From old packager. The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.7.4', 'Certificate of Good Manufacturing Practice (GMP)', `For new packaging site. Valid. Authenticated from Chamber of Commerce & Egyptian Consulate/Embassy.`)
+      ]),
+      VG('5.43.8', '5.43.8. Change Reg. Type from Imported Bulk to UL', [
+        VFR('5.43.8.1'),
+        VL('5.43.8.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of Bulk MFG site of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce or Notary & Egyptian consulate/embassy.`),
+        VL('5.43.8.3', 'In case of Toll Manufacturing: Manufacturing contract', `Between LH/Applicant & New Manufacturer. Valid. A letter from LH/MAH authorizing the applicant to sign contracts. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce, Egyptian embassy/consulate or Notary is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.8.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.8.5', 'Last Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.43.8.6', 'Last Updated Commercial Register (New Manufacturer)'),
+        VL('5.43.8.7', 'Packaging Waiver', `From old packager (in case of changing packaging site). The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.8.8', 'Storage contract', `Between LH/Applicant & Storage site. Valid. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce, Egyptian embassy/consulate or Notary is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.8.9', 'Storage Site License'),
+        VL('5.43.8.10', 'Submission of API supplier addition request', `Refer to API supplier addition checklist.`)
+      ]),
+      VG('5.43.9', '5.43.9. Change Reg. Type from Imported Bulk to Local', [
+        VFR('5.43.9.1'),
+        VL('5.43.9.2', 'Letter of Variation', `From LH/MAH. Stating the transfer of ownership of the product with clarification of the consequential changes and justification for this change. The product trade name & reg. no. is mentioned. Authenticated by the Chamber of commerce & Egyptian consulate/embassy.`),
+        VL('5.43.9.3', 'In case of Toll Manufacturing: Manufacturing contract', `Between New LH & New Manufacturer. Valid. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.9.4', 'Attached Annex of the contract', `The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.9.5', 'Latest Updated Manufacturing site license', `Production line &/or area needed for manufacturing the product is present.`),
+        VL('5.43.9.6', 'Last Updated Commercial Register', `Of the new manufacturing site.`),
+        VL('5.43.9.7', 'Packaging Waiver (In case of changing packaging site)', `From old packager. The product trade name & reg. no. is mentioned. Authenticated from Bank & EDA Legal Affairs.`),
+        VL('5.43.9.8', 'Storage contract', `Between New LH & Storage site. Valid. Authenticated from Bank & EDA Legal Affairs. Authentication from chamber of commerce, Egyptian embassy/consulate or Notary is needed in case the LH/MAH signs the contract.`),
+        VL('5.43.9.9', 'Storage Site License'),
+        VL('5.43.9.10', '3 Copies of Composition declaration', `On New LH letterhead. Signed & stamped. Identical to the one attached with the registration license or to the latest finally approved composition.`),
+        VL('5.43.9.11', 'Submission of API supplier addition request', `Refer to API supplier addition checklist.`)
+      ])
+    ]),
+    VG('5.44', '5.44. Updating Analysis File', [
+      VF('5.44.1'),
+      VL('5.44.2', '150 EDA Chairman Renewal Approval + CADC Labs Analysis Certificate', `* 150 EDA Chairman Renewal Approval. * CADC Labs Analysis Certificate OR a "Not Found" letter from CADC.`)
+    ]),
+    VG('5.45', '5.45. Clarification / Change of salt equivalence and/or crystalline state (e.g. hydrate, solvate, polymorph)', [
+      VF('5.45.1'),
+      VL('5.45.2', 'Old composition', `"Signed and stamped".`),
+      VL('5.45.3', 'New composition', `"Signed and stamped".`),
+      VL('5.45.4', 'Comparison table between old and new composition'),
+      VL('5.45.5', 'Scientific Reference for molecular weight of base and salt', `E.g. Pharmacopoeia.`),
+      VL('5.45.6', 'Calculations of salt equivalence', `On applicant paper, signed and stamped.`),
+      VL('5.45.7', 'Innovator Reference stating the salt form and its quantity'),
+      VL('5.45.8', 'C.O.A & Composition of all suppliers of Active Ingredient or Premixes'),
+      VL('5.45.9', 'In case of clarification: report from Inspection Department', `Stating the form of used materials including batch record and any previous studies on the same batch.`),
+      VL('5.45.10', 'In case of clarification: import plans / approvals, customs releases, invoices and supplier certificates', `Have the same batch numbers that were imported for three years.`),
+      VCTD('5.45.11')
+    ]),
+    VG('5.46', '5.46. Clarification / Change of particle size for water insoluble or sparingly soluble API (particle size must be stated in suppliers COA by D90 or mesh size)', [
+      VF('5.46.1'),
+      VL('5.46.2', 'Old composition', `"Signed and stamped".`),
+      VL('5.46.3', 'New composition', `"Signed and stamped".`),
+      VL('5.46.4', 'Comparison table between old and new composition'),
+      VL('5.46.5', 'C.O.A of all suppliers for active ingredient', `Stating D90 or mesh size.`),
+      VL('5.46.6', 'Stating Range of D90 in New Composition'),
+      VL('5.46.7', 'Report from Inspection Department stating the Range of D90 of used materials', `In case of clarifying particle size.`),
+      VL('5.46.8', 'Import plans / approvals, customs releases, invoices and supplier certificates', `Have the same batch numbers that were imported for three years (in case of clarifying particle size).`),
+      VCTD('5.46.9')
+    ]),
+    VG('5.47', '5.47. Clarification / Change or Addition of the solvents used in manufacturing process (e.g. ethanol, methanol)', [
+      VF('5.47.1'),
+      VL('5.47.2', 'Old composition', `"Signed and stamped".`),
+      VL('5.47.3', 'New composition', `"Signed and stamped".`),
+      VL('5.47.4', 'Comparison table between old and new composition'),
+      VL('5.47.5', 'Declaration Letter', `States class of the solvent according to USP Classification.`),
+      VL('5.47.6', 'In New Composition: write the solvent used & that it is totally evaporated during manufacturing process'),
+      VL('5.47.7', 'In case of clarification: inspection report including Batch Record for old production batches', `Clarifying that the solvent was used before.`),
+      VL('5.47.8', 'Inspection analysis including residual solvent test', `In case of clarification.`),
+      VCTD('5.47.9')
+    ]),
+    VG('5.48', '5.48. Clarification / Change of Active / Inactive Ingredient Specification', [
+      VF('5.48.1'),
+      VL('5.48.2', 'Pharmacopoeia Monograph (Last Edition)'),
+      VL('5.48.3', 'C.O.A of all suppliers of Active Ingredient or Premixes'),
+      VL('5.48.4', 'Comparison between Old & New Finished Pharmaceutical Product Specification', `Signed and stamped.`),
+      VL('5.48.5', 'Import plans / approvals, customs releases, invoices and supplier certificates', `Have the same batch numbers that were imported for three consecutive years (in case of clarifying specifications of active ingredient or in case suppliers are not stated in the registration license).`),
+      VL('5.48.6', 'Old composition', `"Signed and stamped".`),
+      VL('5.48.7', 'New composition', `"Signed and stamped".`),
+      VL('5.48.8', 'Comparison table between old and new composition'),
+      VCTD('5.48.9')
+    ]),
+    VG('5.49', '5.49. Change in Color of Finished Pharmaceutical product', [
+      VF('5.49.1'),
+      VL('5.49.2', 'Sample', `(If needed).`),
+      VL('5.49.3', 'Old & New Certificate of Analysis'),
+      VL('5.49.4', 'Pharmacopoeia Monograph & Certificate of analysis of supplier of active ingredient or pellets or premixes', `In case of change in range of color without any qualitative or quantitative change in composition.`),
+      VL('5.49.5', 'Scientific Justification for color change with scientific reference'),
+      VL('5.49.6', 'Manufacturing process flow chart', `In case the change in physical character is due to change in manufacturing process.`),
+      VL('5.49.7', 'Composition of capsule shell on supplier paper', `In case of change of color of capsule shell.`),
+      VCTD('5.49.8')
+    ]),
+    VG('5.50', '5.50. Correcting Dosage Form', [
+      VF('5.50.1'),
+      VL('5.50.2', 'Innovator reference and its leaflet'),
+      VL('5.50.3', 'Any studies issued previously for New Dosage form'),
+      VCTD('5.50.4')
+    ]),
+    VG('5.51', '5.51. Change / Addition of Route of Administration', [
+      VF('5.51.1'),
+      VL('5.51.2', 'Reference for Innovator and its leaflet'),
+      VL('5.51.3', 'Any studies issued previously for New Route of Administration'),
+      VL('5.51.4', 'In case of Infusion: declaration letter stating the used solvent for infusion'),
+      VCTD('5.51.5')
+    ]),
+    VG('5.52', '5.52. Change in supplier of packaging components / devices', [
+      VF('5.52.1'), VCOAO('5.52.2'), VCOAN('5.52.3'), VSMP('5.52.4'),
+      VL('5.52.5', 'Certificate of device'),
+      VCTD('5.52.6'),
+      VL('5.52.7', 'Copy of the Inspection sampling report', `Stating the batch number and the date of its production.`),
+      VL('5.52.8', 'Request for clarifying physical character to comply with CADC Final report', `In case the physical description of the product differs from the CADC description.`)
+    ]),
+    VG('5.53', '5.53. Change in secondary packaging component of the active Substance', [
+      VF('5.53.1'), VAM('5.53.2'), VCTD('5.53.3')
+    ])
+  ]),
+  Object.assign(VG('V', 'V) Documents for Reliance Evaluation Route', [
+    VL('V.F', 'Fees', `Fees: 1000 L.E. Fees for Registration batch analysis: 15,000 L.E. (for one batch). Fees for Inspection batch analysis: 3,000 L.E. (for one batch). Fees for Competitive study: 2000 L.E. (for one batch).`),
+    VG('V.A', 'In case of Finished pharmaceutical product imported from non-reference country and not marketed in a reference country', [
+      VL('V.A.1', 'The approval of another NRA'),
+      VL('V.A.2', 'Sameness Letter'),
+      VL('V.A.3', 'The studies conducted in country of origin')
+    ]),
+    VG('V.B', 'In case of Imported Finished product that has been approved Variation Requests by at least one reference regulatory authority (SRA) or WHO prequalification', [
+      VL('V.B.1', 'Sameness letter'),
+      VL('V.B.2', 'Unredacted Assessment report', `Otherwise justified with evidence.`),
+      VL('V.B.3', 'Application submitted to the SRA'),
+      VL('V.B.4', 'Proof of approval from at least one reference regulatory authority', `Otherwise justified with evidence.`),
+      VL('V.B.5', 'A linking between the application and the approval from the Reference Authority', `Unless otherwise justified.`),
+      VL('V.B.6', 'A linking between the application and supportive documents', `Unless otherwise justified.`),
+      VL('V.B.7', 'Approval issued by the SRA'),
+      VL('V.B.8', 'Updated sections of the CTD')
+    ])
+  ], `In addition to the common Administrative & Relevant documents, the following documents should be submitted for Good Practice of Reliance Post Approval variations. Notes from the notice: (1) Applicants can submit Post-Approval Changes (PACs) that may not be stated in EDA Guidelines; EDA will evaluate the change through a risk-based assessment to ensure compliance with safety, efficacy and quality standards, and may require additional information or reject the request if it is non-compliant. (2) The non-sequential order of versions of the CTD makes the reliance evaluation unreliable — the company must submit the updated version containing all sequential updates. (3) EDA relies on the approval issued by the SRA of the entire group of variations as a grouping variation; therefore the applicant must submit all variations mentioned in this approval.`), { optional: true }),
+  Object.assign(VG('VI', 'VI) Structured CTD format for Human Pharmaceutical Post Marketing Variation Approval requests (Module 3)', VCTD_STRUCT(), `In case of submission of a Human Pharmaceutical Post Marketing Variation Approval request, it must be submitted according to the structured CTD format below. Upload only the sections affected by the variation — this part is a reference structure and is not counted in the completion percentage.`), { noProg: true })
+];
+
+/* ============ HUMAN PHARMACEUTICAL VARIATIONS ============
+   Same idea as the Quality (EG-CTD) module: pick a company → product → a tree of
+   the documents EDA requires for a variation, upload files per requirement,
+   tick the parts that apply to this submission, follow completion, export a ZIP.
+   Data: DB[company].variations[rowId] = { note, files[] (general), sec:{code:{files}},
+   applies:{code:bool} } — synced with the company data (saveDB); file bytes live in
+   the Supabase Storage "attachments" bucket under variations/. */
+const VAR_DEFAULT_ON = ['S1', 'S2'];   // common sections ticked by default
+let varView = 'list', varCompany = null, varRowId = null, varRowIndex = null;
+let varHideNA = false;
+let varExpanded = new Set(['II', 'III', 'IV', 'GENERAL']);
+const CTD_GENERAL_TITLE = 'General attachments — مرفقات عامة';
+const VAR_GENERAL_NODE = { code:'GENERAL', title:CTD_GENERAL_TITLE, desc:'', children:[], noCode:true };
+
+(function markNoProg(nodes, np){
+  nodes.forEach(n=>{ if(np || n.noProg) n.np = true; markNoProg(n.children || [], !!n.np); });
+})(VAR_TREE, false);
+const VAR_TOP_COLORS = { II:'#1f5fa8', III:'#7b3fa0', IV:'#d9731a', V:'#0e7490', VI:'#4d7c0f' };
+const VAR_COLOR_MAP = (function(){
+  const m = { GENERAL:'#6b7280' };
+  VAR_TREE.forEach(top=>{
+    (function paint(n){ m[n.code] = VAR_TOP_COLORS[top.code] || '#7b3fa0'; (n.children||[]).forEach(paint); })(top);
+  });
+  return m;
+})();
+function varColor(code){ return VAR_COLOR_MAP[code] || '#6b7280'; }
+function getVariationRec(company, rowId){
+  const d = DB[company];
+  if(!d || !rowId) return { note:'', files:[], sec:{}, applies:{} };
+  if(!d.variations) d.variations = {};
+  if(!d.variations[rowId]) d.variations[rowId] = { note:'', files:[], sec:{}, applies:{} };
+  const r = d.variations[rowId];
+  if(!Array.isArray(r.files)) r.files = [];
+  if(r.note === undefined) r.note = '';
+  if(!r.sec) r.sec = {};
+  if(!r.applies) r.applies = {};
+  return r;
+}
+function varRec(){ return getVariationRec(varCompany, varRowId); }
+/* read-only: never creates empty sections while rendering */
+function varSecRO(rec, code){
+  if(code === 'GENERAL') return rec;
+  return rec.sec[code] || { files: [] };
+}
+function varApplies(rec, code){
+  return rec.applies[code] !== undefined ? !!rec.applies[code] : VAR_DEFAULT_ON.indexOf(code) >= 0;
+}
+function varNodeFileCount(rec, node){
+  let n = varSecRO(rec, node.code).files.length;
+  (node.children || []).forEach(c=> { n += varNodeFileCount(rec, c); });
+  return n;
+}
+/* completion: a requirement counts only when every ticked-group above it is ticked */
+function varProgress(company, rowId){
+  const rec = getVariationRec(company, rowId);
+  let done = 0, total = 0;
+  (function walk(nodes, depth, ok){
+    nodes.forEach(n=>{
+      const isGroup = n.children && n.children.length;
+      if(n.np) return;                       // reference-only structure (section VI)
+      if(isGroup){
+        walk(n.children, depth+1, ok && ((depth === 0 && !n.optional) || varApplies(rec, n.code)));
+      } else if(ok){
+        total++;
+        if(varSecRO(rec, n.code).files.length) done++;
+      }
+    });
+  })(VAR_TREE, 0, true);
+  return { done, total };
+}
+
+function openVariations(){
+  varCompany = (currentCompany && DB[currentCompany]) ? currentCompany : (Object.keys(DB)[0] || null);
+  varView = 'list'; varRowId = null; varRowIndex = null;
+  renderVariations();
+  document.getElementById('variationsOverlay').classList.add('show');
+}
+function closeVariations(){ document.getElementById('variationsOverlay').classList.remove('show'); }
+function varSelectCompany(v){ varCompany = v; renderVariations(); }
+function varOpenProduct(i){
+  const d = DB[varCompany];
+  if(!d || !d.rows[i]) return;
+  varRowIndex = i;
+  varRowId = ensureRowId(varCompany, i);
+  varView = 'detail';
+  varExpanded = new Set(['II', 'III', 'IV', 'GENERAL']);
+  renderVariations();
+}
+function varBack(){ varView = 'list'; renderVariations(); }
+function varToggle(code, open){
+  const had = varExpanded.has(code);
+  if(open === had) return;                 // initial render fires toggle too — ignore
+  if(open){ varExpanded.add(code); renderVariations(); }   // children are rendered lazily
+  else varExpanded.delete(code);
+}
+function varToggleHideNA(){ varHideNA = !varHideNA; renderVariations(); }
+function varToggleApply(code, checked){
+  varRec().applies[code] = !!checked;
+  saveDB();
+  renderVariations();
+}
+function varUpdateNote(v){
+  const rec = varRec();
+  if(rec.note === v) return;
+  rec.note = v;
+  saveDB();
+}
+
+function renderVariations(){
+  const body = document.getElementById('varBody');
+  if(!body) return;
+  const prevScroll = body.scrollTop;
+  body.innerHTML = varView === 'detail' ? renderVarDetailHtml() : renderVarListHtml();
+  body.scrollTop = prevScroll;
+}
+function renderVarListHtml(){
+  const companies = Object.keys(DB);
+  if(!companies.length) return '<div class="empty"><div class="icon">📂</div>أضف شركة ومنتجات أولاً من الشاشة الرئيسية</div>';
+  if(!varCompany || !DB[varCompany]) varCompany = companies[0];
+  const d = DB[varCompany];
+  const nameIdx = findFieldIndex(varCompany, ['product name']);
+  const apiIdx = findFieldIndex(varCompany, ['api']);
+  const companySelect = `<div class="field-row" style="max-width:340px">
+      <label>الشركة / الملف</label>
+      <select onchange="varSelectCompany(this.value)">
+        ${companies.map(c=> `<option value="${escAttr(c)}" ${c===varCompany?'selected':''}>${esc(c)}</option>`).join('')}
+      </select>
+    </div>`;
+  const hint = `<div class="hint-box">جهّز مستندات طلب الـ Variation لكل منتج حسب إشعار الهيئة (EDREX:NP.CAPP.109 — Version 2/2026): علّم الأقسام اللي بتنطبق على طلبك، وارفع المستند المطلوب في كل بند، وتابع نسبة الاكتمال، وصدّر الملف ZIP.</div>`;
+  if(!d.rows.length){
+    return `${hint}${companySelect}<div class="empty"><div class="icon">📦</div>لا توجد منتجات في هذه الشركة بعد</div>`;
+  }
+  const cards = d.rows.map((r,i)=>{
+    const rowId = ensureRowId(varCompany, i);
+    const prog = varProgress(varCompany, rowId);
+    const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
+    const pname = nameIdx>=0 ? (r[nameIdx]||'—') : '—';
+    const papi = apiIdx>=0 ? (r[apiIdx]||'') : '';
+    return `<div class="pcard" onclick="varOpenProduct(${i})">
+        <div class="pname">${esc(pname)}</div>
+        <div class="papi">${esc(papi)}</div>
+        <div class="ctd-progress-bar"><div class="ctd-progress-fill" style="width:${pct}%"></div></div>
+        <div class="meta"><span>${prog.done} / ${prog.total} مستند مطلوب</span><span>${pct}%</span></div>
+      </div>`;
+  }).join('');
+  return `${hint}${companySelect}<div class="products" style="margin-top:12px">${cards}</div>`;
+}
+function renderVarDetailHtml(){
+  const d = DB[varCompany];
+  const nameIdx = findFieldIndex(varCompany, ['product name']);
+  const row = d.rows[varRowIndex] || [];
+  const productName = nameIdx>=0 ? (row[nameIdx]||'') : '';
+  const rec = varRec();
+  const prog = varProgress(varCompany, varRowId);
+  const pct = prog.total ? Math.round(prog.done/prog.total*100) : 0;
+  const treeHtml = [VAR_GENERAL_NODE].concat(VAR_TREE).map(n=> renderVarNode(n, 0, rec, true)).join('');
+  return `
+    <div class="section-title">📦 ${esc(productName)}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+      <div style="flex:1;min-width:220px">
+        <div class="ctd-progress-bar"><div class="ctd-progress-fill" style="width:${pct}%"></div></div>
+        <div class="meta" style="margin-top:6px"><span>${prog.done} / ${prog.total} مستند مطلوب مكتمل</span><span>${pct}%</span></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline" onclick="varBack()">⬅ قائمة المنتجات</button>
+        <button class="btn btn-gold" onclick="exportVarZip('${escAttr(productName)}')">⇩ تصدير الملف كـ ZIP</button>
+      </div>
+    </div>
+    <div class="field-row">
+      <label>ملاحظات الـ Variations</label>
+      <textarea rows="2" onchange="varUpdateNote(this.value)">${esc(rec.note)}</textarea>
+    </div>
+    <div class="ctd-typebar">
+      <span class="ctd-typelabel">علّم الأقسام اللي بتنطبق على طلبك (مطبّق) — النسبة بتتحسب عليها بس</span>
+      <label class="ctd-hide"><input type="checkbox" ${varHideNA?'checked':''} onchange="varToggleHideNA()"> إخفاء غير المطبّق</label>
+    </div>
+    <div class="ctd-tree ctd-ltr">${treeHtml}</div>`;
+}
+function renderVarNode(node, depth, rec, ancestorsOk){
+  const isGroup = node.children && node.children.length;
+  const hasBox = isGroup && !node.np && (depth >= 1 || node.optional);
+  const on = hasBox ? varApplies(rec, node.code) : true;
+  if(varHideNA && hasBox && !on) return '';
+  const okHere = ancestorsOk && on;
+  const files = varSecRO(rec, node.code).files;
+  const total = varNodeFileCount(rec, node);
+  const childrenHtml = (isGroup && varExpanded.has(node.code)) ? node.children.map(c=> renderVarNode(c, depth+1, rec, okHere)).join('') : '';
+  const isLeaf = !isGroup;
+  const fileListHtml = isLeaf ? (files.length ? files.map(f=>`
+      <div class="att-item">
+        <span class="att-name">📄 ${esc(f.name)}</span>
+        <span class="att-meta">${f.sizeKB} ك.ب · ${esc(f.date)}</span>
+        <span class="att-actions">
+          <button class="btn btn-outline" onclick="event.stopPropagation();varViewFile('${escAttr(node.code)}','${escAttr(f.id)}')">عرض</button>
+          <button class="btn btn-outline" onclick="event.stopPropagation();varDownloadFile('${escAttr(node.code)}','${escAttr(f.id)}')">تنزيل</button>
+          <button class="btn btn-red" onclick="event.stopPropagation();varRemoveFile('${escAttr(node.code)}','${escAttr(f.id)}')">حذف</button>
+        </span>
+      </div>`).join('') : `<div class="att-empty">لا توجد مستندات في هذا البند بعد</div>`) : '';
+  const uploadHtml = isLeaf ? `
+        <label class="btn btn-outline att-upload-btn">
+          ＋ إرفاق مستند لهذا البند
+          <input type="file" multiple style="display:none" onchange="varHandleUpload(event,'${escAttr(node.code)}')">
+        </label>` : '';
+  const open = varExpanded.has(node.code) ? 'open' : '';
+  const dim = (ancestorsOk && on) ? '' : 'opacity:.55;';
+  return `
+    <details class="ctd-node" style="margin-inline-start:${depth*16}px;--mc:${varColor(node.code)};${dim}" ${open} ontoggle="varToggle('${escAttr(node.code)}', this.open)">
+      <summary class="ctd-node-head">
+        ${node.noCode ? '' : `<span class="ctd-node-code">${esc(node.code)}</span>`}
+        <span class="ctd-node-title">${esc(node.title)}</span>
+        ${hasBox ? `<label class="var-apply" onclick="event.stopPropagation()" title="علّم لو القسم ده بينطبق على طلبك"><input type="checkbox" ${on?'checked':''} onchange="varToggleApply('${escAttr(node.code)}', this.checked)"> مطبّق</label>` : ''}
+        ${(depth>0 || total) ? `<span class="ctd-clip ${total?'has':''}" title="المرفقات">${CTD_CLIP_SVG}${total?`<b>${total}</b>`:''}</span>` : ''}
+      </summary>
+      <div class="ctd-node-body">
+        ${node.desc ? `<div class="var-desc">${esc(node.desc)}</div>` : ''}
+        ${fileListHtml}
+        ${uploadHtml}
+        ${childrenHtml}
+      </div>
+    </details>`;
+}
+
+/* ---- file actions ---- */
+function varFindFile(code, id){
+  return varSecRO(varRec(), code).files.find(f=> f.id === id);
+}
+function varHandleUpload(e, code){
+  const files = Array.from(e.target.files || []);
+  if(!files.length) return;
+  if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){ toast('تعذر رفع المستند — لا يوجد اتصال بالخادم'); e.target.value=''; return; }
+  const company = varCompany, rowId = varRowId;
+  toast(files.length>1 ? `جارٍ رفع ${files.length} ملفات...` : 'جارٍ رفع الملف...');
+  Promise.all(files.map(file=>{
+    const attId = genAttId();
+    const path = `variations/${rowId}/${sanitizeForPath(code)}/${attId}_${sanitizeForPath(file.name)}`;
+    return window.cloudSync.uploadAttachmentFile(path, file).then(()=>{
+      const rec = getVariationRec(company, rowId);
+      const target = code === 'GENERAL' ? rec : (rec.sec[code] = rec.sec[code] || { files: [] });
+      target.files.push({
+        id: attId, name: file.name, url: window.cloudSync.getAttachmentPublicUrl(path), path,
+        sizeKB: Math.round(file.size/1024), date: new Date().toISOString().slice(0,10),
+        uploadedBy: currentUser ? currentUser.username : ''
+      });
+    });
+  })).then(()=>{
+    saveDB();
+    renderVariations();
+    toast('تم إرفاق المستند بنجاح ✓');
+  }).catch(err=>{
+    console.warn('variation upload failed', err);
+    saveDB();
+    renderVariations();
+    toast('تعذر رفع المستند — تأكد من الاتصال بالإنترنت وحاول تاني');
+  });
+  e.target.value = '';
+}
+function varViewFile(code, id){
+  const f = varFindFile(code, id);
+  if(!f || !f.url){ toast('تعذر فتح المستند'); return; }
+  window.open(f.url, '_blank');
+}
+function varDownloadFile(code, id){
+  const f = varFindFile(code, id);
+  if(!f || !f.url){ toast('تعذر تنزيل المستند'); return; }
+  const url = f.url + (f.url.includes('?') ? '&' : '?') + 'download=' + encodeURIComponent(f.name);
+  const link = document.createElement('a');
+  link.href = url; link.download = f.name; link.target = '_blank';
+  document.body.appendChild(link); link.click(); link.remove();
+}
+function varRemoveFile(code, id){
+  if(!confirm('هل تريد حذف هذا المستند؟')) return;
+  const rec = varRec();
+  const target = varSecRO(rec, code);
+  const f = target.files.find(x=> x.id === id);
+  const idx = target.files.findIndex(x=> x.id === id);
+  if(idx >= 0) target.files.splice(idx, 1);
+  saveDB();
+  if(f && f.path && window.cloudSync) window.cloudSync.deleteAttachmentFile(f.path);
+  renderVariations();
+  toast('تم حذف المستند');
+}
+/* ZIP: one folder per requirement that has files, mirroring the tree */
+function exportVarZip(productName){
+  if(!window.JSZip){ toast('تعذر تحميل مكتبة ضغط الملفات — تأكد من الاتصال بالإنترنت'); return; }
+  const rec = varRec();
+  const zip = new JSZip();
+  function hasFiles(n){ return varNodeFileCount(rec, n) > 0; }
+  function addNode(node, folder){
+    if(!hasFiles(node)) return Promise.resolve();
+    const label = sanitizeFolderName(node.noCode ? node.title : `${node.code} - ${node.title}`).slice(0, 90) || node.code;
+    const sub = folder.folder(label);
+    const filePromises = varSecRO(rec, node.code).files.map(f=>
+      fetch(f.url).then(r=> r.blob()).then(blob=> sub.file(sanitizeFolderName(f.name) || 'file', blob))
+    );
+    return Promise.all(filePromises.concat((node.children||[]).map(c=> addNode(c, sub))));
+  }
+  toast('جارٍ تجهيز ملف الـ Variations...');
+  Promise.all([VAR_GENERAL_NODE].concat(VAR_TREE).map(n=> addNode(n, zip)))
+    .then(()=> zip.generateAsync({type:'blob'}))
+    .then(blob=>{
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${sanitizeFolderName(productName || 'Variation')} - Variations.zip`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(()=> URL.revokeObjectURL(url), 5000);
+      toast('تم تجهيز ملف الـ ZIP ✓');
+    })
+    .catch(err=>{
+      console.warn('variations export failed', err);
+      toast('تعذر تجهيز ملف الـ ZIP — تأكد من الاتصال بالإنترنت وحاول تاني');
+    });
 }
 
 /* ============ AUTHORITY LINKS PANEL ============
@@ -2689,11 +3806,47 @@ function initProductDetailReportSelectors(){
   if(companies.length){
     companySel.value = (currentCompany && DB[currentCompany]) ? currentCompany : companies[0];
   }
+  populateReportDecreeSelect();
   populateReportProductSelect();
 }
-function onReportCompanyChange(){ populateReportProductSelect(); }
+function onReportCompanyChange(){
+  populateReportDecreeSelect();
+  populateReportProductSelect();
+}
+/* Decree values are grouped after trimming / collapsing spaces, so
+   "425 /2015" and "425/2015" count as the same decree. */
+function normalizeDecree(v){
+  return String(v==null ? '' : v).trim().replace(/\s+/g,' ').replace(/\s*\/\s*/g,'/');
+}
+const REPORT_NO_DECREE = '__none__';
+function populateReportDecreeSelect(){
+  const companySel = document.getElementById('reportCompanySelect');
+  const decreeSel = document.getElementById('reportDecreeSelect');
+  if(!companySel || !decreeSel) return;
+  const prev = decreeSel.value;
+  const company = companySel.value;
+  const d = DB[company];
+  if(!d || !d.rows.length){
+    decreeSel.innerHTML = '<option value="">كل القرارات</option>';
+    return;
+  }
+  const decreeIdx = findFieldIndex(company, ['decree']);
+  const counts = {};
+  let none = 0;
+  d.rows.forEach(r=>{
+    const k = decreeIdx>=0 ? normalizeDecree(r[decreeIdx]) : '';
+    if(!k) none++; else counts[k] = (counts[k]||0) + 1;
+  });
+  const keys = Object.keys(counts).sort((x,y)=> x.localeCompare(y, undefined, {numeric:true}));
+  let html = `<option value="">كل القرارات (${d.rows.length})</option>`;
+  html += keys.map(k=> `<option value="${escAttr(k)}">${esc(k)} (${counts[k]})</option>`).join('');
+  if(none) html += `<option value="${REPORT_NO_DECREE}">بدون قرار (${none})</option>`;
+  decreeSel.innerHTML = html;
+  decreeSel.value = (prev && (counts[prev] || (prev===REPORT_NO_DECREE && none))) ? prev : '';
+}
 function populateReportProductSelect(){
   const companySel = document.getElementById('reportCompanySelect');
+  const decreeSel = document.getElementById('reportDecreeSelect');
   const productSel = document.getElementById('reportProductSelect');
   if(!companySel || !productSel) return;
   const company = companySel.value;
@@ -2704,10 +3857,17 @@ function populateReportProductSelect(){
     return;
   }
   const nameIdx = findFieldIndex(company, ['product name']);
-  productSel.innerHTML = d.rows.map((r,i)=>{
+  const decreeIdx = findFieldIndex(company, ['decree']);
+  const wanted = decreeSel ? decreeSel.value : '';
+  const opts = [];
+  d.rows.forEach((r,i)=>{
+    const dec = decreeIdx>=0 ? normalizeDecree(r[decreeIdx]) : '';
+    if(wanted === REPORT_NO_DECREE ? dec : (wanted && dec !== wanted)) return;
     const name = nameIdx>=0 ? (r[nameIdx]||'بدون اسم') : (r[1]||'بدون اسم');
-    return `<option value="${i}">${esc(name)} (#${i+1})</option>`;
-  }).join('');
+    const tail = (!wanted && dec) ? ` — ${dec}` : '';
+    opts.push(`<option value="${i}">${esc(name)}${esc(tail)} (#${i+1})</option>`);
+  });
+  productSel.innerHTML = opts.length ? opts.join('') : '<option value="">لا توجد منتجات بهذا القرار</option>';
   renderProductDetailReport();
 }
 function renderProductDetailReport(){
@@ -3858,7 +5018,6 @@ const CTD_TABS = [
   {id:'apilist', label:'API Listing'},
   {id:'guideline', label:'EDA Guideline'}
 ];
-const CTD_GENERAL_TITLE = 'General attachments — مرفقات عامة';
 const CTD_GENERAL_NODE = { code:'GENERAL', title:CTD_GENERAL_TITLE, f:null, children:[], noCode:true };
 const API_GENERAL_ITEM = { code:'GENERAL', title:CTD_GENERAL_TITLE, noCode:true };
 /* paperclip beside each tab name: uploads straight into that tab for the open product */
