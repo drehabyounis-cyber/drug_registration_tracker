@@ -433,6 +433,10 @@ input[type=file]{display:none}
 .expiry-item .ei-days.danger{background:var(--red-bg);color:var(--red)}
 .sidebar-alert-badge{display:flex;align-items:center;gap:6px;margin:0 12px 10px;padding:8px 10px;background:rgba(194,59,59,.18);border:1px solid rgba(194,59,59,.4);border-radius:9px;color:#ffd9d9;font-size:12px;cursor:pointer}
 .pcard.under-reg-card{background:#fff6b8;border-color:#e0b800}
+.nr-box{margin:8px 0 2px;padding:6px 9px;border-radius:8px;background:#dcf5e3;border:1px solid #2e9e4f;font-size:12px;line-height:1.5}
+.nr-left{font-weight:800;color:#14532d}
+.nr-must{color:#157a36;font-weight:800;font-size:12px;margin-top:2px;direction:ltr;text-align:left}
+.nr-box.nr-expired .nr-left{color:#b42318}
 .ur-box{margin:8px 0 2px;padding:6px 9px;border-radius:8px;background:#ffed8a;border:1px solid #e0b800;font-size:12px;line-height:1.5}
 .ur-left{font-weight:800;color:#5c4400}
 .ur-hard{color:#d00000;font-weight:800;font-size:12px;margin-top:2px}
@@ -1894,6 +1898,37 @@ function underRegHtml(w){
   const txt = w.expired ? 'انتهت المدة منذ '+part : 'متبقي '+part;
   return `<div class="ur-box${w.expired?' ur-expired':''}" title="${UNDER_REG_MONTHS} شهر من Issue Date (Pricing)"><div class="ur-left">${w.expired?'⛔':'⏳'} ${txt}</div><div class="ur-hard" dir="ltr">Hard file must be submitted before ${fmtYMD(w.end)}</div></div>`;
 }
+/* ============ NON-ROUTINE 450 — 12 MONTHS FROM "Box approval Date" ============
+   Products whose Decree is "( Non-routine )450": production must start within
+   12 months of the Box approval Date. The card shows what is left of the 12
+   months and "Must be Production before <date>" in green. */
+const NON_ROUTINE_MONTHS = 12;
+function isNonRoutine450(decree){
+  const d = String(decree == null ? '' : decree).toLowerCase().replace(/\s+/g, '');
+  return /non-?routine/.test(d) && d.indexOf('450') >= 0;
+}
+function nonRoutineWindow(company, row){
+  const dIdx = findFieldIndex(company, ['decree']);
+  if(dIdx < 0 || !isNonRoutine450(row[dIdx])) return null;
+  const bIdx = findFieldIndex(company, ['box approval']);
+  if(bIdx < 0) return null;
+  const box = parseIssueDate(row[bIdx]);
+  if(!box) return null;
+  const end = addMonthsClamped(box, NON_ROUTINE_MONTHS);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const expired = end < today;
+  const a = expired ? end : today, b = expired ? today : end;
+  let months = (b.getFullYear()-a.getFullYear())*12 + (b.getMonth()-a.getMonth());
+  if(b.getDate() < a.getDate()) months--;
+  months = Math.max(months, 0);
+  const days = Math.round((b - addMonthsClamped(a, months)) / 86400000);
+  return { end, expired, months, days };
+}
+function nonRoutineHtml(w){
+  const part = (w.months ? w.months+' شهر' : '') + (w.months && w.days ? ' و' : '') + ((w.days || !w.months) ? w.days+' يوم' : '');
+  const txt = w.expired ? 'انتهت مهلة الـ 12 شهر منذ '+part : 'المتبقي من الـ 12 شهر: '+part;
+  return `<div class="nr-box${w.expired?' nr-expired':''}" title="${NON_ROUTINE_MONTHS} شهر من Box approval Date"><div class="nr-left">${w.expired?'⛔':'⏳'} ${txt}</div><div class="nr-must">Must be Production before ${fmtYMD(w.end)}</div></div>`;
+}
 function renderProducts(){
   const grid = document.getElementById('productsGrid');
   if(!currentCompany){ grid.innerHTML = `<div class="empty"><div class="icon">📂</div>ابدأ بإضافة شركة جديدة أو استيراد ملف Excel</div>`; return; }
@@ -1942,6 +1977,7 @@ function renderProducts(){
     const cardTitle = lastEdit ? ` title="${escAttr('آخر تعديل: '+lastEdit.u+' — '+formatEditTime(lastEdit.t))}"` : '';
     const editorDot = lastEdit ? `<span class="color-dot" style="background:${editColor}"></span>` : '';
     const urw = underRegWindow(currentCompany, r);
+    const nrw = nonRoutineWindow(currentCompany, r);
     const urCls = (urw && !urw.expired && urw.months >= UNDER_REG_MIN_MONTHS) ? ' under-reg-card' : '';
     return `<div class="pcard ${expCls}${urCls}"${cardStyle}${cardTitle} onclick="openProduct(${i})">
       ${expFlag}
@@ -1949,6 +1985,7 @@ function renderProducts(){
       <div class="papi">${esc(api)}</div>
       <span class="badge ${statusBadgeClass(status)}">${esc(status||'—')}</span>
       ${urw ? underRegHtml(urw) : ''}
+      ${nrw ? nonRoutineHtml(nrw) : ''}
       <div class="meta"><span>${decree?('قرار: '+esc(decree)):''}</span><span>${editorDot}#${i+1}</span></div>
       ${gtin ? `<div class="gtin-wrap"><svg id="card-gtin-${i}"></svg><div class="gtin-num">${esc(gtin)}</div></div>` : ''}
       <div class="att-indicator" id="att-ind-${i}"></div>
