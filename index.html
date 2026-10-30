@@ -2,15 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#0f2942">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="تسجيل الأدوية">
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>متابعة تسجيل الأدوية</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -383,6 +375,11 @@ body{margin:0;font-family:"Segoe UI","Tahoma",Arial,sans-serif;background:var(--
 .live-notif{position:relative;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--gold);border-radius:10px;box-shadow:0 8px 24px rgba(15,41,66,.18);padding:10px 30px 10px 13px;font-size:12px;line-height:1.55;color:var(--text);cursor:pointer;animation:notifIn .28s ease-out}
 .live-notif .ln-close{position:absolute;top:6px;left:6px;width:19px;height:19px;display:flex;align-items:center;justify-content:center;border-radius:50%;color:var(--muted);font-size:14px;line-height:1}
 .live-notif:hover .ln-close{background:var(--bg);color:var(--navy)}
+.live-notif.missed{border-left-color:var(--blue)}
+.live-notif .ln-list{margin-top:7px;border-top:1px solid var(--line);padding-top:6px;max-height:260px;overflow-y:auto}
+.live-notif .ln-item{padding:5px 4px;border-bottom:1px dashed var(--line);border-radius:6px;cursor:pointer}
+.live-notif .ln-item:hover{background:var(--bg)}
+.live-notif .ln-sub{font-weight:700;color:var(--navy2)}
 .live-notif.hide{animation:notifOut .22s ease-in forwards}
 .live-notif .ln-top{display:flex;align-items:center;gap:6px;margin-bottom:3px}
 .live-notif .ln-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
@@ -509,11 +506,6 @@ details[open]>.ctd-node-head::before{transform:rotate(90deg)}
 .ctd-flag{border-radius:20px;padding:2px 9px;font-size:11px;font-weight:700;flex-shrink:0;background:var(--green-bg);color:var(--green)}
 .ctd-flag.N{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
 .ctd-flag.O{background:var(--amber-bg);color:var(--amber)}
-
-/* ---- PWA install button (shown only on Android/Chrome when installable) ---- */
-#pwaInstallBtn{display:none;position:fixed;bottom:calc(16px + env(safe-area-inset-bottom,0px));right:16px;z-index:300;background:var(--gold);color:var(--navy);border:none;border-radius:999px;padding:12px 18px;font-size:14px;font-weight:800;box-shadow:0 6px 18px rgba(15,41,66,.35);cursor:pointer;font-family:inherit}
-#pwaInstallBtn.show{display:inline-flex;align-items:center;gap:8px}
-@media(display-mode:standalone){ #pwaInstallBtn{display:none!important} body{padding-top:env(safe-area-inset-top,0px)} }
 </style>
 </head>
 <body>
@@ -976,7 +968,7 @@ function pushAccessLog(entry){
 function getChangeLog(){ return CHANGELOG_CACHE; }
 function pushChangeLog(entry){
   const log = CHANGELOG_CACHE.slice();
-  log.unshift(Object.assign({time: new Date().toLocaleString('ar-EG')}, entry));
+  log.unshift(Object.assign({time: new Date().toLocaleString('ar-EG'), ts: Date.now()}, entry));
   if(log.length > 1000) log.length = 1000;
   CHANGELOG_CACHE = log;
   localStorage.setItem(CHANGELOG_KEY, JSON.stringify(log));
@@ -1088,6 +1080,7 @@ function enterApp(){
   currentCompany = Object.keys(DB)[0] || null;
   appStarted = true;
   renderAll();
+  processChangeNotifs();
   runMigrations().then(()=>{
     if(!DB[currentCompany]) currentCompany = Object.keys(DB)[0] || null;
     renderAll();
@@ -1591,6 +1584,69 @@ function toast(msg){
   t.textContent = msg; t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'), 2200);
 }
+/* ---- Catch-up notifications for edits made while this user was offline ----
+   Every changeLog entry now carries a numeric `ts`. Each user keeps, on each
+   device, the `ts` of the newest edit they have already been shown. Whenever
+   the change log arrives (live event, reconnect, tab regains focus, or login)
+   every entry by someone else newer than that mark is announced: up to 3 as
+   individual cards, more than that as one expandable summary card. */
+const LASTSEEN_PREFIX = 'drugRegLastSeenChange_v1_';
+function getLastSeenTs(){
+  if(!currentUser) return null;
+  const v = localStorage.getItem(LASTSEEN_PREFIX + currentUser.username);
+  return v===null ? null : (parseInt(v,10) || 0);
+}
+function setLastSeenTs(ts){
+  if(currentUser) localStorage.setItem(LASTSEEN_PREFIX + currentUser.username, String(ts));
+}
+function processChangeNotifs(){
+  if(!appStarted || !currentUser) return;
+  const stamped = (CHANGELOG_CACHE||[]).filter(e=> e && typeof e.ts==='number');
+  const maxTs = stamped.reduce((m,e)=> Math.max(m,e.ts), 0);
+  const last = getLastSeenTs();
+  if(last===null){ setLastSeenTs(maxTs); return; } // first time on this device: no flood of old entries
+  const fresh = stamped
+    .filter(e=> e.ts>last && e.username!==currentUser.username)
+    .sort((a,b)=> a.ts-b.ts);
+  if(maxTs>last) setLastSeenTs(maxTs);
+  if(!fresh.length) return;
+  if(fresh.length<=3) fresh.forEach(showLiveChangeNotif);
+  else showMissedChangesSummary(fresh);
+}
+function showMissedChangesSummary(entries){
+  const wrap = document.getElementById('liveNotifWrap');
+  if(!wrap) return;
+  const users = [...new Set(entries.map(e=> e.username||'مستخدم'))];
+  const shown = entries.slice().reverse().slice(0,30);
+  const el = document.createElement('div');
+  el.className = 'live-notif missed';
+  el.innerHTML = `
+    <span class="ln-close" title="إغلاق">✕</span>
+    <div class="ln-top"><span class="ln-user">📥 ${entries.length} تعديلات حدثت أثناء غيابك</span></div>
+    <div class="ln-detail">بواسطة: ${users.map(esc).join('، ')}</div>
+    <div class="ln-time">اضغط لعرض التفاصيل</div>
+    <div class="ln-list" style="display:none">
+      ${shown.map((e,i)=>`
+        <div class="ln-item" data-i="${i}">
+          <b>${esc(e.username||'مستخدم')}</b> ${esc(e.action||'تعديل')}
+          <div class="ln-sub">${esc([e.company,e.product].filter(v=>v&&v!=='-').join(' — '))}</div>
+          <div class="ln-time">${esc(e.time||'')}</div>
+        </div>`).join('')}
+      ${entries.length>shown.length ? `<div class="ln-time">… و ${entries.length-shown.length} تعديل أقدم (راجع سجل التعديلات)</div>` : ''}
+    </div>`;
+  const remove = ()=>{ el.classList.add('hide'); setTimeout(()=> el.remove(), 220); };
+  el.querySelector('.ln-close').onclick = (ev)=>{ ev.stopPropagation(); remove(); };
+  el.onclick = ()=>{
+    const list = el.querySelector('.ln-list');
+    list.style.display = list.style.display==='none' ? 'block' : 'none';
+  };
+  el.querySelectorAll('.ln-item').forEach(it=>{
+    it.onclick = (ev)=>{ ev.stopPropagation(); jumpToChangeLogEntry(shown[+it.dataset.i]); };
+  });
+  wrap.appendChild(el);
+}
+window.addEventListener('offline', ()=> toast('⚠️ انقطع الاتصال — أي تعديلات للآخرين هتظهرلك عند رجوع الإنترنت'));
+window.addEventListener('online', ()=> toast('✅ رجع الاتصال — جاري التحقق من التعديلات اللي فاتتك'));
 /* ---- Live "last edit" notification (left side of screen) ----
    Fired from the changeLog realtime callback whenever a new audit entry
    arrives from another device/user, so everyone sees, live, who just
@@ -4156,15 +4212,9 @@ function boot(){
       localStorage.setItem(CHANGELOG_KEY, JSON.stringify(CHANGELOG_CACHE));
       const adminOverlay = document.getElementById('adminOverlay');
       if(appStarted && adminOverlay && adminOverlay.classList.contains('show')) renderAdminPanel();
-      // Live left-side notification of the latest edit, for every signed-in
-      // user. Comparing against prevTop means a user who just made the edit
-      // themselves (their own local push already matches the cloud echo)
-      // won't get a redundant popup on top of their save confirmation —
-      // everyone else, whose cache didn't already have it, will.
-      const newTop = CHANGELOG_CACHE[0];
-      if(appStarted && newTop && (!prevTop || prevTop.time!==newTop.time || prevTop.username!==newTop.username || prevTop.product!==newTop.product || prevTop.action!==newTop.action)){
-        showLiveChangeNotif(newTop);
-      }
+      // Live + catch-up notifications (see processChangeNotifs): shows every edit by
+      // someone else that this user hasn't seen yet, including ones made while offline.
+      processChangeNotifs();
     },
     onAttachments: (list)=>{
       if(!seen.attachments){ seen.attachments = true; cloudState.attachmentsEmpty = !list || list.length===0; }
@@ -5538,31 +5588,6 @@ function exportCtdZip(productName){
       toast('تعذر تجهيز ملف الـ ZIP — تأكد من الاتصال بالإنترنت وحاول تاني');
     });
 }
-</script>
-
-<button id="pwaInstallBtn" type="button">📲 تثبيت التطبيق على الموبايل</button>
-<script>
-/* ============ PWA: service worker + install prompt ============
-   Data sync is unchanged — the installed app talks to the same Supabase
-   project, so edits made on the phone and on the web appear on each other live. */
-(function(){
-  if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-    window.addEventListener('load', function(){
-      navigator.serviceWorker.register('sw.js').catch(function(e){ console.warn('SW register failed', e); });
-    });
-  }
-  var deferred=null, btn=document.getElementById('pwaInstallBtn');
-  window.addEventListener('beforeinstallprompt', function(e){
-    e.preventDefault(); deferred=e;
-    if(btn) btn.classList.add('show');
-  });
-  if(btn) btn.addEventListener('click', function(){
-    if(!deferred) return;
-    deferred.prompt();
-    deferred.userChoice.finally(function(){ deferred=null; btn.classList.remove('show'); });
-  });
-  window.addEventListener('appinstalled', function(){ if(btn) btn.classList.remove('show'); });
-})();
 </script>
 </body>
 </html>
