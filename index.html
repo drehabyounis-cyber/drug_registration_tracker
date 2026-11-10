@@ -775,12 +775,24 @@ let _knownCompanyNames = new Set(); // used to detect remote deletions to push
 function sanitizeForPath(s){
   return String(s||'file').replace(/[^\w.\-]+/g,'_').slice(0,120);
 }
+const ATT_ALLOWED_EXT = ['pdf','doc','docx'];
+const ATT_ACCEPT = '.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+function attExt(name){ const m = /\.([^.]+)$/.exec(String(name||'')); return m ? m[1].toLowerCase() : ''; }
+function attMime(name){
+  const e = attExt(name);
+  if(e==='pdf') return 'application/pdf';
+  if(e==='doc') return 'application/msword';
+  if(e==='docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  return 'application/octet-stream';
+}
+function attIcon(name){ const e = attExt(name); return (e==='doc'||e==='docx') ? '📝' : '📄'; }
 function genAttId(){
   return 'att_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
 }
 function addAttachment(rowId, fieldIdx, fieldLabel, name, dataUrl, sizeKB){
   const attId = genAttId();
-  return fetch(dataUrl).then(r=> r.blob()).then(blob=>{
+  return fetch(dataUrl).then(r=> r.blob()).then(rawBlob=>{
+    const blob = new Blob([rawBlob], { type: attMime(name) });
     const path = `${rowId}/${attId}_${sanitizeForPath(name)}`;
     if(!window.cloudSync || !window.cloudSync.uploadAttachmentFile){
       return Promise.reject(new Error('التطبيق غير متصل بالخادم السحابي — لا يمكن رفع مرفقات وأنت غير متصل'));
@@ -2243,8 +2255,8 @@ function renderModalBody(){
   }).join('');
 
   const note = canAttach
-    ? `<div class="hint-box">📎 يمكنك إرفاق نسخة PDF من الموافقة أو الخطاب الصادر بجانب كل مرحلة من مراحل التسجيل — اضغط على أيقونة الدبوس بجوار اسم المرحلة.</div>`
-    : `<div class="hint-box">احفظ المنتج أولاً، ثم افتحه مرة أخرى لإضافة مرفقات PDF لكل مرحلة من مراحل التسجيل.</div>`;
+    ? `<div class="hint-box">📎 يمكنك إرفاق أكثر من ملف (PDF أو Word) من الموافقة أو الخطاب الصادر بجانب كل مرحلة من مراحل التسجيل — اضغط على أيقونة الدبوس بجوار اسم المرحلة.</div>`
+    : `<div class="hint-box">احفظ المنتج أولاً، ثم افتحه مرة أخرى لإضافة مرفقات (PDF أو Word) لكل مرحلة من مراحل التسجيل.</div>`;
 
   const statusOptions = `<datalist id="statusSuggestions">
       <option value="Registered"></option>
@@ -2305,10 +2317,10 @@ function renderFieldAttPanel(idx){
   const fieldLabel = DB[currentCompany].fields[idx] || '';
   const itemsHtml = list.length ? list.map(a=>`
     <div class="att-item">
-      <span class="att-name">📄 ${esc(a.name)}</span>
+      <span class="att-name">${attIcon(a.name)} ${esc(a.name)}</span>
       <span class="att-meta">${a.sizeKB} ك.ب · ${a.date}</span>
       <span class="att-actions">
-        <button class="btn btn-outline" onclick="viewAttachment('${a.attId}')">عرض</button>
+        <button class="btn btn-outline" onclick="viewAttachment('${a.attId}')">${(attExt(a.name)==='pdf')?'عرض':'فتح'}</button>
         <button class="btn btn-outline" onclick="downloadAttachment('${a.attId}')">تنزيل</button>
         <button class="btn btn-red" onclick="removeAttachment('${a.attId}',${idx})">حذف</button>
       </span>
@@ -2316,8 +2328,8 @@ function renderFieldAttPanel(idx){
   panel.innerHTML = `
     ${itemsHtml}
     <label class="btn btn-outline att-upload-btn">
-      ＋ إرفاق PDF لمرحلة "${esc(fieldLabel)}"
-      <input type="file" accept="application/pdf" multiple style="display:none" onchange="handleFieldAttachmentUpload(event, ${idx})">
+      ＋ إرفاق ملفات (PDF / Word) لمرحلة "${esc(fieldLabel)}" — يمكنك اختيار أكثر من ملف
+      <input type="file" accept="${ATT_ACCEPT}" multiple style="display:none" onchange="handleFieldAttachmentUpload(event, ${idx})">
     </label>`;
 }
 function handleFieldAttachmentUpload(e, idx){
@@ -2326,7 +2338,7 @@ function handleFieldAttachmentUpload(e, idx){
   if(!currentRowId){ toast('احفظ المنتج أولاً'); return; }
   const fieldLabel = DB[currentCompany].fields[idx] || '';
   const validFiles = files.filter(f=>{
-    if(f.type !== 'application/pdf'){ toast(`تم تجاهل "${f.name}" — يجب أن يكون الملف PDF`); return false; }
+    if(!ATT_ALLOWED_EXT.includes(attExt(f.name))){ toast(`تم تجاهل "${f.name}" — الصيغ المسموحة: PDF أو Word`); return false; }
     return true;
   });
   if(!validFiles.length){ e.target.value=''; return; }
@@ -2363,6 +2375,7 @@ function getAttachmentById(attId){
 function viewAttachment(attId){
   getAttachmentById(attId).then(a=>{
     if(!a || !a.url){ toast('تعذر فتح المرفق'); return; }
+    if(attExt(a.name)!=='pdf'){ downloadAttachment(attId); return; } // Word: no in-browser preview
     window.open(a.url, '_blank');
   });
 }
